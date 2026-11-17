@@ -79,11 +79,13 @@ No browser is required:
 node --check client.js
 node --check index.js
 node --check scripts/sync-schedule.mjs
-$env:TZ='Asia/Tehran'; node .scratch/timelogic.cjs   # 16 boundary cases, ribbon, hover points
-$env:TZ='Asia/Tehran'; node .scratch/copy.cjs        # dictionary parity, manifest, input validation
+
+TZ=Asia/Tehran node tests/time-model.test.cjs   # 16 boundary cases, ribbon, hover points
+TZ=Asia/Tehran node tests/locales.test.cjs      # dictionary parity, manifest, input validation
+node scripts/sync-schedule.mjs --check          # the repo matches the official page
 ```
 
-`timelogic.cjs` slices the time model out of `client.js` and runs it, so the assertions cannot drift from the shipped code.
+`time-model.test.cjs` slices the time model out of `client.js` and runs it, so the assertions cannot drift from the shipped code.
 
 ## Limitations
 

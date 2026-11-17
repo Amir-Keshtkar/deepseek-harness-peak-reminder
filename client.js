@@ -570,6 +570,7 @@ window.__ModuleLoader__.load({
       const seen = React.useRef(new Map());
 
       React.useEffect(() => {
+        if (statuses === undefined || statuses === null) return;
         const next = new Map();
         let replied = false;
         let asked = false;
