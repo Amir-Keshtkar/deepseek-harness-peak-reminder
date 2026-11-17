@@ -1,5 +1,7 @@
 # Peak Reminder
 
+[![npm version](https://img.shields.io/npm/v/deepseek-harness-peak-reminder.svg)](https://www.npmjs.com/package/deepseek-harness-peak-reminder)
+
 **A DeepSeek Harness plugin for DeepSeek API peak hours.** A live price-window clock sits in the conversation header, next to desktop notifications, this session's token usage and estimated cost, the account's remaining balance, and a right-to-left switch for Persian and Arabic text.
 
 ![The three status states beside the countdown card](docs/preview.svg)
@@ -40,7 +42,7 @@ plugin_manager install_bundle: github:Amir-Keshtkar/deepseek-harness-peak-remind
 
 The old `github:Amir-Keshtkar/PeakReminder` id still resolves through GitHub's rename redirect, but the new one is the canonical spelling.
 
-The same plugin is published to npm, for a versioned install that no clone can drift from:
+It is also on npm as [deepseek-harness-peak-reminder](https://www.npmjs.com/package/deepseek-harness-peak-reminder), for a versioned install that no clone can drift from:
 
 ```
 plugin_manager install_bundle: deepseek-harness-peak-reminder
