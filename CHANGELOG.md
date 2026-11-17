@@ -3,6 +3,15 @@
 All notable changes to this DeepSeek Harness plugin. Versions are the
 `version` field in `package.json`.
 
+## 1.7.0 — 2026-11-17
+
+- The usage panel's balance band now renders: it read the account service but
+  never received the value, so the band stayed empty.
+- The headline is the charged total (topped-up plus granted wallets), with the
+  two parts named on the line below instead of showing granted credit alone.
+- The band shows a placeholder while the first read is in flight, refreshes when
+  the panel opens, and loads once as soon as the account services are ready.
+
 ## 1.6.0 — 2026-11-17
 
 - Right-to-left text reaches Markdown documents opened from the files panel,
