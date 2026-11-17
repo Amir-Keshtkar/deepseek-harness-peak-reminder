@@ -3,6 +3,13 @@
 All notable changes to this DeepSeek Harness plugin. Versions are the
 `version` field in `package.json`.
 
+## 1.5.0 — 2026-11-17
+
+- Clicking a desktop notification brings the window forward and opens the
+  Session the reply or question belongs to, instead of only focusing the app.
+- Published to npm as `deepseek-harness-peak-reminder`; the package name, the
+  bundle row, and the client module id now agree.
+
 ## 1.4.0 — 2026-11-17
 
 - Repository renamed to `deepseek-harness-peak-reminder`; the plugin id and the

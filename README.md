@@ -40,6 +40,12 @@ plugin_manager install_bundle: github:Amir-Keshtkar/deepseek-harness-peak-remind
 
 The old `github:Amir-Keshtkar/PeakReminder` id still resolves through GitHub's rename redirect, but the new one is the canonical spelling.
 
+The same plugin is published to npm, for a versioned install that no clone can drift from:
+
+```
+plugin_manager install_bundle: deepseek-harness-peak-reminder
+```
+
 For development, point the installer at the working copy instead and the running app picks up edits:
 
 ```
@@ -123,6 +129,7 @@ No. It reads token counters the app already publishes and renders text it was gi
 ## Limitations
 
 - Notifications are suppressed while the window has focus.
+- Clicking a notification opens the Session it announced, when the Workspace UI is present.
 - The RTL selectors match attribute hooks and CSS-module local names; a rename upstream would narrow them, not break rendering.
 - The usage cost is an estimate at the rate in force when the panel is read: a session that spans a peak boundary is not split between the two rates. The price table is shipped with the plugin.
 - The usage cell is hidden while the sidebar is collapsed, because the whole sidebar foot is hidden on this desktop build.

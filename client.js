@@ -13,7 +13,7 @@
  * schedule; everything else is derived from them.
  */
 window.__ModuleLoader__.load({
-  id: '@local/peak-reminder',
+  id: 'deepseek-harness-peak-reminder',
   factory(require) {
     const React = require('react');
     const h = React.createElement;
@@ -576,18 +576,31 @@ window.__ModuleLoader__.load({
 
     /**
      * Show one desktop notification, unless the window is already in front.
+     * Clicking it brings the window forward and opens the Session it described.
      * @param {string} title - headline text.
      * @param {string} body - supporting text.
+     * @param {string | undefined} sessionId - the Session the notice is about.
+     * @param {(sessionId: string) => void} [openSession] - navigation into that Session.
      * @returns {void}
      */
-    function showNotification(title, body) {
+    function showNotification(title, body, sessionId, openSession) {
       if (!prefStore.get().notify) return;
       if (typeof Notification === 'undefined') return;
       if (document.visibilityState === 'visible' && document.hasFocus()) return;
       try {
         if (Notification.permission !== 'granted' && Notification.permission !== 'default') return;
         const notice = new Notification(title, { body, tag: 'dsh-peak-reminder' });
-        notice.onclick = () => { window.focus(); notice.close(); };
+        notice.onclick = () => {
+          notice.close();
+          window.focus();
+          if (typeof sessionId === 'string' && typeof openSession === 'function') {
+            try {
+              openSession(sessionId);
+            } catch {
+              // The window is already in front; navigation is an extra.
+            }
+          }
+        };
       } catch {
         // A blocked or unsupported notification surface is not an error.
       }
@@ -595,11 +608,11 @@ window.__ModuleLoader__.load({
 
     /**
      * Watch session status and announce a finished reply or a new question.
-     * @param {{useSessionStatus: Function, t: Function}} props - the status hook and copy.
+     * @param {{useSessionStatus: Function, t: Function, openSession?: Function}} props - hooks, copy, navigation.
      * @returns {null} renders nothing.
      */
     function PeakNotifier(props) {
-      const { useSessionStatus, t } = props;
+      const { useSessionStatus, t, openSession } = props;
       const statuses = useSessionStatus(value => value);
       const seen = React.useRef(new Map());
 
@@ -608,6 +621,7 @@ window.__ModuleLoader__.load({
         const next = new Map();
         let replied = false;
         let asked = false;
+        let target = undefined;
         for (const [sessionId, status] of statuses) {
           const before = seen.current.get(sessionId);
           const pending = status.pendingInteraction;
@@ -616,15 +630,22 @@ window.__ModuleLoader__.load({
             : null;
           next.set(sessionId, { running: status.running === true, question });
           if (before === undefined) continue;
-          if (before.running && status.running !== true) replied = true;
-          if (question !== null && question !== before.question) asked = true;
+          if (question !== null && question !== before.question) {
+            asked = true;
+            target = sessionId;
+            continue;
+          }
+          if (before.running && status.running !== true) {
+            replied = true;
+            if (target === undefined) target = sessionId;
+          }
         }
         seen.current = next;
         if (asked) {
-          showNotification(t('notify.question.title'), t('notify.question.body'));
+          showNotification(t('notify.question.title'), t('notify.question.body'), target, openSession);
           return;
         }
-        if (replied) showNotification(t('notify.reply.title'), t('notify.reply.body'));
+        if (replied) showNotification(t('notify.reply.title'), t('notify.reply.body'), target, openSession);
       }, [statuses, t]);
 
       return null;
@@ -632,16 +653,16 @@ window.__ModuleLoader__.load({
 
     /**
      * Root-scoped surface: the RTL stylesheet and the notification watcher.
-     * @param {{t: Function, useSessionStatus?: Function}} props - copy and the status hook.
+     * @param {{t: Function, useSessionStatus?: Function, openSession?: Function}} props - copy, hook, navigation.
      * @returns {React.ReactElement | null} the stylesheet while RTL is on.
      */
     function PeakGlobal(props) {
-      const { t, useSessionStatus } = props;
+      const { t, useSessionStatus, openSession } = props;
       const prefs = usePrefs();
       return h(React.Fragment, null,
         prefs.rtl ? h('style', { 'data-peak-reminder': 'rtl' }, RTL_CSS) : null,
         typeof useSessionStatus === 'function'
-          ? h(PeakNotifier, { useSessionStatus, t })
+          ? h(PeakNotifier, { useSessionStatus, t, openSession })
           : null,
       );
     }
@@ -1563,11 +1584,25 @@ window.__ModuleLoader__.load({
           locale: NS,
         }, PeakToast));
 
+        // The Workspace UI owns navigation; a build without it still gets the notice.
+        const openSession = sessionId => {
+          try {
+            const workspace = ctx.get('uiWorkspace');
+            if (workspace !== undefined && workspace !== null
+              && typeof workspace.openSession === 'function') {
+              workspace.openSession(sessionId);
+            }
+          } catch {
+            // Navigation is an offer on top of the notice, never a requirement.
+          }
+        };
+
         ctx.slots.inject('shell.overlay', () => ctx.slots.register({
           name: 'shell.overlay',
           id: 'peak-reminder.global',
           order: 39,
           locale: NS,
+          inject: () => ({ openSession }),
         }, PeakGlobal));
 
         // The usage cell sits in the sidebar foot, directly above the account row.
