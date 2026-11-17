@@ -1315,6 +1315,21 @@ window.__ModuleLoader__.load({
   direction: ltr;
   text-align: left;
 }
+/* A Markdown file opened from the files panel reads right to left as well; its
+   code, YAML frontmatter, and formulas keep their own direction. */
+[data-document-markdown],
+[data-document-markdown] [class*="_markdown"] {
+  direction: rtl;
+  text-align: start;
+}
+[data-document-markdown] pre,
+[data-document-markdown] code,
+[data-document-markdown] [data-code-wrap],
+[data-document-markdown] [data-document-frontmatter],
+[data-document-markdown] .katex-display {
+  direction: ltr;
+  text-align: left;
+}
 `;
 
     const CSS = `

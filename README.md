@@ -24,7 +24,7 @@ Click it for a card with the countdown to the next change, a 24-hour ribbon of t
 
 **Usage.** A compact cell sits in the sidebar foot, directly above the account row, showing this session's token total and estimated cost. Click it for the input, cached, and output buckets, decode speed, turn count with total model time, the model when the session reports one, and the basis of the estimate. Below them, in its own tinted band so it never reads as a session metric, is the account's remaining balance — with granted credit on a second line when there is any — read from the account service each time the panel opens. Cost comes from DeepSeek's published per-million rates, doubled inside a peak window; it is an estimate, not a bill.
 
-**Right-to-left text.** Answers, the questions you write, the session-list titles, and the agent's multi-choice questions with their options all read right to left. Code blocks and formulas stay left to right. All three switches live in the card and are remembered per browser.
+**Right-to-left text.** Answers, the questions you write, the session-list titles, the agent's multi-choice questions with their options, and Markdown files opened from the files panel all read right to left. Code blocks, YAML frontmatter, and formulas stay left to right. All three switches live in the card and are remembered per browser.
 
 ## Install
 

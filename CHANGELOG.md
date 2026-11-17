@@ -3,6 +3,11 @@
 All notable changes to this DeepSeek Harness plugin. Versions are the
 `version` field in `package.json`.
 
+## 1.6.0 — 2026-11-17
+
+- Right-to-left text reaches Markdown documents opened from the files panel,
+  with code blocks, YAML frontmatter, and formulas kept left to right.
+
 ## 1.5.0 — 2026-11-17
 
 - Clicking a desktop notification brings the window forward and opens the

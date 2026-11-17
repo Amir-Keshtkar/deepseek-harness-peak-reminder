@@ -1,6 +1,6 @@
 {
   "name": "deepseek-harness-peak-reminder",
-  "version": "1.5.0",
+  "version": "1.6.0",
   "type": "module",
   "description": "DeepSeek Harness plugin: live DeepSeek API peak-hours clock, desktop notifications, token usage and cost, account balance, and RTL text.",
   "keywords": [
