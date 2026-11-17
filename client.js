@@ -59,7 +59,7 @@ window.__ModuleLoader__.load({
      * files, so the browser follows this file; the built-in constants above stay
      * authoritative when it is unreachable or malformed.
      */
-    const REMOTE_SCHEDULE_URL = 'https://raw.githubusercontent.com/Amir-Keshtkar/PeakReminder/main/schedule.json';
+    const REMOTE_SCHEDULE_URL = 'https://raw.githubusercontent.com/Amir-Keshtkar/deepseek-harness-peak-reminder/main/schedule.json';
     const REMOTE_CACHE_KEY = 'dsh.peak-reminder.schedule';
     const REMOTE_TTL_MS = 6 * 3600000;
     const REMOTE_TIMEOUT_MS = 4000;
@@ -96,6 +96,23 @@ window.__ModuleLoader__.load({
         'notify.reply.body': 'The response is ready.',
         'notify.question.title': 'DeepSeek asked a question',
         'notify.question.body': 'Open DeepSeek Harness to answer.',
+        'usage.label': 'Usage',
+        'usage.session': 'This session',
+        'usage.input': 'Input',
+        'usage.cached': 'Cached',
+        'usage.output': 'Output',
+        'usage.speed': 'Speed',
+        'usage.cost': 'Cost',
+        'usage.turns': 'Turns',
+        'usage.time': 'Time',
+        'usage.model': 'Model',
+        'usage.empty': 'No usage yet',
+        'usage.estimate': 'Estimated at current rates',
+        'usage.tokps': '{n} tok/s',
+        'balance.label': 'Balance',
+        'balance.granted': 'Granted',
+        'balance.signedOut': 'Sign in to view',
+        'balance.unavailable': 'Unavailable',
       },
       zh: {
         'status.peak': '高峰时段',
@@ -125,6 +142,23 @@ window.__ModuleLoader__.load({
         'notify.reply.body': '回复已准备好。',
         'notify.question.title': 'DeepSeek 有问题',
         'notify.question.body': '打开 DeepSeek Harness 回答。',
+        'usage.label': '用量',
+        'usage.session': '本会话',
+        'usage.input': '输入',
+        'usage.cached': '缓存命中',
+        'usage.output': '输出',
+        'usage.speed': '速度',
+        'usage.cost': '费用',
+        'usage.turns': '轮次',
+        'usage.time': '用时',
+        'usage.model': '模型',
+        'usage.empty': '暂无用量',
+        'usage.estimate': '按当前价格估算',
+        'usage.tokps': '{n} tok/s',
+        'balance.label': '余额',
+        'balance.granted': '赠送',
+        'balance.signedOut': '登录后查看',
+        'balance.unavailable': '不可用',
       },
     };
 
@@ -612,6 +646,335 @@ window.__ModuleLoader__.load({
       );
     }
 
+    /* --------------------------------------------------------------------- *
+     * Usage
+     * --------------------------------------------------------------------- */
+
+    /**
+     * DeepSeek list prices in USD per million tokens. Off-peak is half of peak
+     * on every bucket, which is why the table carries both.
+     */
+    const PRICE_TABLE = {
+      flash: {
+        off: { input: 0.15, cached: 0.003, output: 0.6 },
+        peak: { input: 0.3, cached: 0.006, output: 1.2 },
+      },
+      pro: {
+        off: { input: 0.66, cached: 0.022, output: 1.98 },
+        peak: { input: 1.32, cached: 0.044, output: 3.96 },
+      },
+    };
+
+    /**
+     * Which price row a model id belongs to.
+     * @param {unknown} model - model id reported for the session, when known.
+     * @returns {'flash' | 'pro'} the price family.
+     */
+    function priceFamily(model) {
+      return typeof model === 'string' && /pro/i.test(model) ? 'pro' : 'flash';
+    }
+
+    /**
+     * Estimate the cost of one session's tokens at the rate in force.
+     * @param {{uncachedInputTokens?: number, cacheReadTokens?: number, outputTokens?: number}} usage - token buckets.
+     * @param {unknown} model - model id, when known.
+     * @param {boolean} peak - whether peak rates apply.
+     * @returns {number} estimated US dollars.
+     */
+    function estimateCost(usage, model, peak) {
+      const family = PRICE_TABLE[priceFamily(model)];
+      const prices = peak ? family.peak : family.off;
+      return (Number(usage.uncachedInputTokens) || 0) / 1e6 * prices.input
+        + (Number(usage.cacheReadTokens) || 0) / 1e6 * prices.cached
+        + (Number(usage.outputTokens) || 0) / 1e6 * prices.output;
+    }
+
+    /**
+     * Compact a token count for a narrow surface.
+     * @param {number} value - raw tokens.
+     * @returns {string} such as `12.4k`.
+     */
+    function formatTokens(value) {
+      const count = Number(value) || 0;
+      if (count >= 1e6) return `${(count / 1e6).toFixed(2)}M`;
+      if (count >= 1e3) return `${(count / 1e3).toFixed(1)}k`;
+      return String(Math.round(count));
+    }
+
+    /**
+     * Format an estimated cost.
+     * @param {number} value - US dollars.
+     * @returns {string} such as `$0.031`.
+     */
+    function formatCost(value) {
+      if (!Number.isFinite(value) || value <= 0) return '$0';
+      return value >= 1 ? `$${value.toFixed(2)}` : `$${value.toFixed(3)}`;
+    }
+
+    /**
+     * Format a duration for the usage rows.
+     * @param {number} value - milliseconds.
+     * @returns {string} such as `2m 14s`.
+     */
+    function formatDuration(value) {
+      const total = Math.max(0, Math.round(Number(value) || 0));
+      const seconds = Math.round(total / 1000);
+      const minutes = Math.floor(seconds / 60);
+      if (minutes >= 60) return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+      if (minutes > 0) return `${minutes}m ${seconds % 60}s`;
+      return `${seconds}s`;
+    }
+
+    /**
+     * The Session shown in the main view, from the list snapshot. This is the
+     * same reference test the Session controller itself publishes with.
+     * @param {object} state - the Session list snapshot.
+     * @returns {string | undefined} the current session id.
+     */
+    function currentSessionId(state) {
+      const rows = state?.byId;
+      if (rows === undefined || rows === null) return undefined;
+      const found = Object.values(rows).find(row => ((row?.retainedBy?.mainView) ?? 0) > 0);
+      return found?.id;
+    }
+
+    /**
+     * A minimal observable snapshot the plugin publishes itself.
+     * @param {unknown} initial - first value.
+     * @returns {{getSnapshot: Function, subscribe: Function, set: Function}} the store.
+     */
+    function createStore(initial) {
+      let value = initial;
+      const listeners = new Set();
+      return {
+        getSnapshot: () => value,
+        subscribe(listener) {
+          listeners.add(listener);
+          return () => { listeners.delete(listener); };
+        },
+        set(next) {
+          if (Object.is(next, value)) return;
+          value = next;
+          for (const listener of listeners) listener();
+        },
+      };
+    }
+
+    /**
+     * Format one wallet amount with its currency symbol.
+     * @param {string} amount - decimal string from the account service.
+     * @param {string} currency - `USD`, `CNY`, or anything else.
+     * @returns {string} such as `¥12.40`.
+     */
+    function formatMoney(amount, currency) {
+      const symbol = currency === 'CNY' ? '¥' : '$';
+      const value = Number(amount);
+      if (!Number.isFinite(value)) return `${symbol}0.00`;
+      if (value > 0 && value < 0.01) return `<${symbol}0.01`;
+      return `${symbol}${value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+    }
+
+    /**
+     * Read one balance bucket as display text.
+     * @param {unknown} wallets - wallet rows from the account service.
+     * @returns {string | null} joined amounts, or null when there is nothing to show.
+     */
+    function balanceText(wallets) {
+      if (!Array.isArray(wallets)) return null;
+      const shown = wallets
+        .filter(wallet => wallet !== null && typeof wallet === 'object' && Number.isFinite(Number(wallet.balance)))
+        .map(wallet => formatMoney(wallet.balance, wallet.currency));
+      return shown.length === 0 ? null : shown.join(' · ');
+    }
+
+    /**
+     * One labelled row in the usage panel.
+     * @param {{label: string, value: string, hint?: string}} props - row content.
+     * @returns {React.ReactElement} the row.
+     */
+    function UsageRow(props) {
+      return h('div', { className: 'peakr-usage-row' },
+        h('span', { className: 'peakr-usage-key' }, props.label),
+        h('span', { className: 'peakr-usage-num' }, props.value),
+        props.hint === undefined ? null : h('span', { className: 'peakr-usage-hint' }, props.hint),
+      );
+    }
+
+    /** Stable selector for readers that have no balance source. */
+    function useNothing() {
+      return undefined;
+    }
+
+    /**
+     * The account balance, kept in its own tinted band so it never reads as a
+     * session metric.
+     * @param {{t: Function, balance: object | undefined}} props - copy and the balance snapshot.
+     * @returns {React.ReactElement | null} the band, or nothing while unread.
+     */
+    function BalanceBand(props) {
+      const { t, balance } = props;
+      if (balance === undefined || balance === null) return null;
+
+      let main;
+      let extra = null;
+      if (balance.status === 'ready') {
+        main = balanceText(balance.value) ?? formatMoney('0', 'USD');
+        const bonus = balanceText(balance.bonusWallets);
+        if (bonus !== null && bonus !== formatMoney('0', 'USD')) extra = `${t('balance.granted')} ${bonus}`;
+      } else if (balance.status === 'signedOut') {
+        main = t('balance.signedOut');
+      } else {
+        main = t('balance.unavailable');
+      }
+
+      return h('div', { className: 'peakr-balance' },
+        h('span', { className: 'peakr-balance-key' },
+          h('svg', {
+            width: 12, height: 12, viewBox: '0 0 16 16', 'aria-hidden': 'true', className: 'peakr-balance-icon',
+          },
+          h('rect', {
+            x: 2, y: 4, width: 12, height: 9, rx: 2.5, fill: 'none', stroke: 'currentColor', strokeWidth: 1.4,
+          }),
+          h('circle', { cx: 11, cy: 8.5, r: 1.1, fill: 'currentColor' }),
+          ),
+          t('balance.label'),
+        ),
+        h('span', {
+          className: balance.status === 'ready' ? 'peakr-balance-value' : 'peakr-balance-value is-muted',
+        }, main),
+        extra === null ? null : h('span', { className: 'peakr-balance-extra' }, extra),
+      );
+    }
+
+    /**
+     * The sidebar usage button and its breakdown panel.
+     * @param {{t: Function, wide: boolean, useSessions: Function}} props - copy and the session hook.
+     * @returns {React.ReactElement | null} the entry, or nothing without the session source.
+     */
+    function UsageEntry(props) {
+      const { t, wide, useSessions } = props;
+      if (typeof useSessions !== 'function') return null;
+      return h(UsageButton, { t, wide, useSessions });
+    }
+
+    /**
+     * Read one session's token buckets and timings.
+     * @param {{t: Function, wide: boolean, useSessions: Function}} props - copy and the session hook.
+     * @returns {React.ReactElement} the button with its panel.
+     */
+    function UsageButton(props) {
+      const { t, wide, useSessions, refreshBalance } = props;
+      const useBalance = props.useBalance === undefined ? useNothing : props.useBalance;
+      const sessionId = useSessions(currentSessionId);
+      const pick = field => state => (sessionId === undefined
+        ? undefined
+        : state?.projectionsBySession?.[sessionId]?.values?.[field]);
+      const usage = useSessions(pick('tokenUsage')) ?? {};
+      const stats = useSessions(pick('sessionStats')) ?? {};
+      const model = useSessions(state => (sessionId === undefined
+        ? undefined
+        : state?.byId?.[sessionId]?.model));
+      const balance = useBalance(value => value);
+      const now = useNow(60000);
+      const peak = isPeakAt(now);
+
+      const input = Number(usage.uncachedInputTokens) || 0;
+      const cached = Number(usage.cacheReadTokens) || 0;
+      const output = Number(usage.outputTokens) || 0;
+      const total = input + cached + output;
+      const cost = estimateCost(usage, model, peak);
+      const speed = Number(stats.decodeMs) > 0
+        ? Math.round((Number(stats.decodeTokens) || 0) / (Number(stats.decodeMs) / 1000))
+        : undefined;
+
+      const [position, setPosition] = React.useState(null);
+      const triggerRef = React.useRef(null);
+      const panelRef = React.useRef(null);
+      const open = position !== null;
+
+      const place = React.useCallback(() => {
+        const trigger = triggerRef.current;
+        if (trigger === null) return;
+        if (typeof refreshBalance === 'function') refreshBalance();
+        const rect = trigger.getBoundingClientRect();
+        const width = Math.min(252, window.innerWidth - 16);
+        setPosition({
+          bottom: window.innerHeight - rect.top + 8,
+          left: Math.max(8, Math.min(rect.left, window.innerWidth - width - 8)),
+          width,
+          maxHeight: Math.max(160, rect.top - 16),
+        });
+      }, []);
+
+      React.useEffect(() => {
+        if (!open) return undefined;
+        const inside = target => (triggerRef.current !== null && triggerRef.current.contains(target))
+          || (panelRef.current !== null && panelRef.current.contains(target));
+        const dismiss = event => { if (!inside(event.target)) setPosition(null); };
+        const escape = event => {
+          if (event.key !== 'Escape' || !inside(document.activeElement)) return;
+          setPosition(null);
+          triggerRef.current?.focus();
+        };
+        const relayout = () => { setPosition(null); };
+        document.addEventListener('pointerdown', dismiss, true);
+        document.addEventListener('keydown', escape);
+        window.addEventListener('resize', relayout);
+        return () => {
+          document.removeEventListener('pointerdown', dismiss, true);
+          document.removeEventListener('keydown', escape);
+          window.removeEventListener('resize', relayout);
+        };
+      }, [open]);
+
+      const summary = total === 0 ? '—' : `${formatTokens(total)} · ${formatCost(cost)}`;
+      const panel = open ? mountFloating(h('div', {
+        ref: panelRef,
+        className: 'peakr-card peakr-usage-card',
+        style: position,
+        role: 'group',
+        'aria-label': t('usage.label'),
+      },
+      h('div', { className: 'peakr-head' },
+        h('span', { className: 'peakr-title' }, t('usage.label')),
+        h('span', { className: 'peakr-usage-scope' }, t('usage.session')),
+      ),
+      h('div', { className: 'peakr-usage-rows' },
+        h(UsageRow, { label: t('usage.input'), value: formatTokens(input) }),
+        h(UsageRow, { label: t('usage.cached'), value: formatTokens(cached) }),
+        h(UsageRow, { label: t('usage.output'), value: formatTokens(output) }),
+        speed === undefined ? null : h(UsageRow, { label: t('usage.speed'), value: t('usage.tokps', { n: speed }) }),
+        h(UsageRow, { label: t('usage.turns'), value: String(Number(stats.turns) || 0), hint: stats.llmMs === undefined ? undefined : formatDuration(stats.llmMs) }),
+        typeof model === 'string' && model !== '' ? h(UsageRow, { label: t('usage.model'), value: model }) : null,
+        h(UsageRow, { label: t('usage.cost'), value: formatCost(cost) }),
+      ),
+      h('div', { className: 'peakr-usage-note' }, t('usage.estimate')),
+      h(BalanceBand, { t, balance }),
+      )) : null;
+
+      return h('div', { className: 'peakr-usage-root' },
+        h(Style),
+        h('button', {
+          ref: triggerRef,
+          type: 'button',
+          className: 'peakr-usage',
+          'data-wide': wide,
+          'aria-expanded': open,
+          title: total === 0 ? t('usage.empty') : summary,
+          onClick: () => { if (open) setPosition(null); else place(); },
+        },
+        h('svg', { width: 14, height: 14, viewBox: '0 0 16 16', 'aria-hidden': 'true', className: 'peakr-usage-icon' },
+          h('rect', { x: 2, y: 9, width: 3, height: 5, rx: 1, fill: 'currentColor', opacity: 0.5 }),
+          h('rect', { x: 6.5, y: 5, width: 3, height: 9, rx: 1, fill: 'currentColor', opacity: 0.72 }),
+          h('rect', { x: 11, y: 2, width: 3, height: 12, rx: 1, fill: 'currentColor' }),
+        ),
+        wide ? h('span', { className: 'peakr-usage-name' }, t('usage.label')) : null,
+        h('span', { className: 'peakr-usage-value' }, summary),
+        ),
+        panel,
+      );
+    }
+
     /**
      * The component-local stylesheet: mounted and removed with its component.
      * @returns {React.ReactElement} a style element.
@@ -1081,6 +1444,69 @@ window.__ModuleLoader__.load({
 .peakr-knob[data-on='true'] { background: var(--dsw-alias-state-business-primary); }
 .peakr-knob[data-on='true']::after { transform: translateX(8px); }
 
+.peakr-usage-root { display: inline-flex; min-width: 0; }
+.peakr-usage {
+  display: inline-flex; align-items: center; gap: 6px; height: 28px;
+  padding: 0 9px; border: 0; border-radius: 8px; background: transparent;
+  color: var(--dsw-alias-label-secondary); font: inherit; font-size: 11px;
+  line-height: 16px; cursor: pointer; min-width: 0;
+}
+.peakr-usage:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary);
+}
+.peakr-usage:focus-visible {
+  outline: 2px solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));
+  outline-offset: 1px;
+}
+.peakr-usage-icon { flex: none; }
+.peakr-usage-name { white-space: nowrap; }
+.peakr-usage-value {
+  color: var(--dsw-alias-label-tertiary);
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+.peakr-usage[data-wide='false'] .peakr-usage-value { display: none; }
+
+.peakr-usage-card { width: 252px; }
+.peakr-usage-scope {
+  margin-left: auto; color: var(--dsw-alias-label-tertiary);
+  font-size: 11px; font-weight: 400;
+}
+.peakr-usage-rows { display: flex; flex-direction: column; gap: 4px; margin-top: 10px; }
+.peakr-usage-row { display: flex; align-items: baseline; gap: 8px; font-size: 12px; line-height: 17px; }
+.peakr-usage-key { color: var(--dsw-alias-label-secondary); }
+.peakr-usage-num {
+  margin-left: auto; color: var(--dsw-alias-label-primary);
+  font-variant-numeric: tabular-nums;
+}
+.peakr-usage-hint { color: var(--dsw-alias-label-tertiary); font-size: 11px; }
+.peakr-usage-note {
+  margin-top: 6px;
+  color: var(--dsw-alias-label-tertiary); font-size: 11px; line-height: 15px;
+}
+.peakr-balance {
+  display: grid; grid-template-columns: auto 1fr; gap: 2px 8px;
+  margin-top: 10px; padding: 8px 10px; border-radius: 10px;
+  background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--dsw-alias-state-business-primary) 18%, transparent);
+}
+.peakr-balance-key {
+  display: inline-flex; align-items: center; gap: 5px;
+  color: var(--dsw-alias-label-secondary); font-size: 11px;
+}
+.peakr-balance-icon { flex: none; }
+.peakr-balance-value {
+  justify-self: end; color: var(--dsw-alias-label-primary);
+  font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums;
+}
+.peakr-balance-value.is-muted {
+  font-size: 11px; font-weight: 400; color: var(--dsw-alias-label-tertiary);
+}
+.peakr-balance-extra {
+  grid-column: 1 / -1; color: var(--dsw-alias-label-tertiary);
+  font-size: 11px; line-height: 15px;
+}
+
 .peakr-toast {
   position: fixed; z-index: 130; left: 50%; pointer-events: auto; cursor: pointer;
   direction: ltr; text-align: left;
@@ -1115,6 +1541,7 @@ window.__ModuleLoader__.load({
       inject: ['slots', 'locale'],
       apply(ctx) {
         ctx.effect(() => ctx.locale.register(NS, COPY), 'peak-reminder: copy');
+        const t = ctx.locale.bind(NS);
 
         ctx.effect(() => {
           void refreshSchedule();
@@ -1142,6 +1569,54 @@ window.__ModuleLoader__.load({
           order: 39,
           locale: NS,
         }, PeakGlobal));
+
+        // The usage cell sits in the sidebar foot, directly above the account row.
+        const balanceStore = createStore(undefined);
+        let refreshBalance = () => {};
+
+        ctx.inject(['accountUi', 'remote'], scope => {
+          let lastRead = 0;
+          let inflight = null;
+          const read = async () => {
+            try {
+              const account = scope.accountUi.getSnapshot();
+              if (account?.view?.status !== 'credential-stored') {
+                balanceStore.set({ status: 'signedOut' });
+                return;
+              }
+              const metadata = scope.accountUi.clientMetadata(scope.locale.getSnapshot().active);
+              const result = await scope.remote.account.getBalance(metadata);
+              if (result?.ok !== true) {
+                balanceStore.set({ status: 'failed' });
+                return;
+              }
+              balanceStore.set(result.value?.status === 'ready' ? result.value : { status: 'failed' });
+            } catch {
+              balanceStore.set({ status: 'failed' });
+            }
+          };
+          refreshBalance = () => {
+            if (inflight !== null) return;
+            const current = balanceStore.getSnapshot();
+            const retry = current === undefined || current?.status === 'failed';
+            const now = Date.now();
+            if (!retry && now - lastRead < 60000) return;
+            lastRead = now;
+            inflight = read().finally(() => { inflight = null; });
+          };
+        });
+
+        ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register({
+          name: 'sidebar.footer.action',
+          id: 'peak-reminder.usage',
+          order: 5,
+          locale: NS,
+          label: () => t('usage.label'),
+          inject: () => ({
+            hooks: { balance: balanceStore },
+            refreshBalance: () => { refreshBalance(); },
+          }),
+        }, UsageEntry));
       },
     };
   },

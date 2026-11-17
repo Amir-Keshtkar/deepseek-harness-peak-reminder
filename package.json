@@ -1,9 +1,36 @@
 {
   "name": "@local/peak-reminder",
-  "version": "1.1.0",
+  "version": "1.4.0",
   "private": true,
   "type": "module",
-  "description": "Reminds you when DeepSeek API peak hours are active.",
+  "description": "DeepSeek Harness plugin: live DeepSeek API peak-hours clock, desktop notifications, token usage and cost, account balance, and RTL text.",
+  "keywords": [
+    "deepseek",
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "deepseek-api",
+    "peak-hours",
+    "off-peak",
+    "pricing",
+    "token-usage",
+    "cost-estimator",
+    "notifications",
+    "rtl",
+    "persian",
+    "farsi",
+    "electron"
+  ],
+  "author": "Amir Keshtkar",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Amir-Keshtkar/deepseek-harness-peak-reminder.git"
+  },
+  "homepage": "https://github.com/Amir-Keshtkar/deepseek-harness-peak-reminder#readme",
+  "bugs": {
+    "url": "https://github.com/Amir-Keshtkar/deepseek-harness-peak-reminder/issues"
+  },
   "scripts": {
     "sync": "node scripts/sync-schedule.mjs"
   },
