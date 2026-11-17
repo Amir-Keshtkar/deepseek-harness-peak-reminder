@@ -7,9 +7,10 @@
  * countdown, a 24-hour ribbon, and the off-peak schedule; a one-shot toast
  * announces the moment a peak begins.
  *
- * The peak window is the DeepSeek API pricing window: off-peak is
- * 16:30–00:30 UTC, so peak is 00:30–16:30 UTC. Adjust the two constants below
- * to follow a different window; everything else is derived from them.
+ * The peak window is DeepSeek's published price schedule: Monday to Friday,
+ * 01:00–04:00 and 06:00–10:00 UTC, excluding Chinese statutory holidays. Every
+ * other hour is off-peak. Adjust the constants below to follow a different
+ * schedule; everything else is derived from them.
  */
 window.__ModuleLoader__.load({
   id: '@local/peak-reminder',
@@ -20,12 +21,30 @@ window.__ModuleLoader__.load({
     /** Where the browser copy of this bundle lives. */
     const NS = 'peakReminder';
 
-    /** First minute of the UTC day that belongs to peak hours (00:30 UTC). */
-    const PEAK_START_UTC_MINUTES = 30;
-    /** First minute of the UTC day that belongs to off-peak hours (16:30 UTC). */
-    const PEAK_END_UTC_MINUTES = 16 * 60 + 30;
+    /**
+     * DeepSeek's peak windows, in minutes of the UTC day, on weekdays:
+     * 01:00–04:00 and 06:00–10:00 UTC (09:00–12:00 and 14:00–18:00 Beijing).
+     * Everything outside them is billed off-peak.
+     */
+    const PEAK_WINDOWS_UTC_MINUTES = [[60, 240], [360, 600]];
     /** How long before a peak the dot turns amber. */
     const LEAD_MINUTES = 30;
+
+    /**
+     * Chinese statutory holidays, as Beijing calendar-date ranges. DeepSeek
+     * bills these days off-peak all day; the list therefore has to be extended
+     * once the State Council publishes the next year's arrangement. A date that
+     * is missing here is simply treated as a normal weekday, never as an error.
+     */
+    const CHINA_HOLIDAY_RANGES = [
+      ['2026-01-01', '2026-01-03'], // New Year
+      ['2026-02-15', '2026-02-23'], // Spring Festival
+      ['2026-04-04', '2026-04-06'], // Qingming
+      ['2026-05-01', '2026-05-05'], // Labor Day
+      ['2026-06-19', '2026-06-21'], // Dragon Boat
+      ['2026-09-25', '2026-09-27'], // Mid-Autumn
+      ['2026-10-01', '2026-10-07'], // National Day
+    ];
 
     const DAY_MS = 86400000;
     const STATUS_TICK_MS = 20000;
@@ -50,9 +69,29 @@ window.__ModuleLoader__.load({
         'axis.start': '00:00',
         'axis.mid': '12:00',
         'axis.end': '24:00',
-        'ribbon.label': 'Peak hours today: {range}',
-        'foot.schedule': 'Off-peak {range} · {zone}',
+        'ribbon.label': 'Peak windows: {range}',
+        'foot.schedule': 'Peak {range} · Mon–Fri · {zone}',
+        'foot.rest': 'Off-peak all day · {zone}',
         'toast.peak': 'Peak hours have started · off-peak in {remaining}',
+      },
+      zh: {
+        'status.peak': '高峰时段',
+        'status.soon': '高峰即将开始',
+        'status.off': '非高峰时段',
+        'caption.peak': '距非高峰时段还有',
+        'caption.soon': '距高峰开始还有',
+        'caption.off': '距高峰开始还有',
+        'unit.d': '天',
+        'unit.h': '小时',
+        'unit.m': '分',
+        'unit.s': '秒',
+        'axis.start': '00:00',
+        'axis.mid': '12:00',
+        'axis.end': '24:00',
+        'ribbon.label': '高峰时段：{range}',
+        'foot.schedule': '高峰 {range} · 周一至周五 · {zone}',
+        'foot.rest': '全天非高峰 · {zone}',
+        'toast.peak': '高峰时段已开始 · 距非高峰时段还有 {remaining}',
       },
     };
 
@@ -70,14 +109,58 @@ window.__ModuleLoader__.load({
       return date.getUTCHours() * 60 + date.getUTCMinutes() + date.getUTCSeconds() / 60;
     }
 
+    /** Beijing calendar dates that DeepSeek bills off-peak all day. */
+    const CHINA_HOLIDAYS = (() => {
+      const days = new Set();
+      for (const [from, to] of CHINA_HOLIDAY_RANGES) {
+        const end = Date.parse(`${to}T00:00:00Z`);
+        for (let at = Date.parse(`${from}T00:00:00Z`); at <= end; at += DAY_MS) {
+          days.add(new Date(at).toISOString().slice(0, 10));
+        }
+      }
+      return days;
+    })();
+
     /**
-     * Whether one instant falls inside peak hours.
+     * The Beijing calendar date of one instant. China has kept UTC+8 without
+     * daylight saving since 1991, so the offset is exact and cheaper than an
+     * `Intl` call inside the transition scan.
+     * @param {number} ms - epoch milliseconds.
+     * @returns {string} `YYYY-MM-DD`.
+     */
+    function beijingDate(ms) {
+      return new Date(ms + 8 * 3600000).toISOString().slice(0, 10);
+    }
+
+    /**
+     * Whether one instant falls on a Chinese statutory holiday.
+     * @param {number} ms - epoch milliseconds.
+     * @returns {boolean} true on a holiday.
+     */
+    function isHoliday(ms) {
+      return CHINA_HOLIDAYS.has(beijingDate(ms));
+    }
+
+    /**
+     * Whether one instant falls on a weekend or a Chinese statutory holiday,
+     * which DeepSeek bills off-peak for the whole day.
+     * @param {number} ms - epoch milliseconds.
+     * @returns {boolean} true when the whole day is off-peak.
+     */
+    function isRestDay(ms) {
+      const weekday = new Date(ms).getUTCDay();
+      return weekday === 0 || weekday === 6 || isHoliday(ms);
+    }
+
+    /**
+     * Whether one instant falls inside a peak window.
      * @param {number} ms - epoch milliseconds.
      * @returns {boolean} true during peak.
      */
     function isPeakAt(ms) {
+      if (isRestDay(ms)) return false;
       const minute = utcMinute(ms);
-      return minute >= PEAK_START_UTC_MINUTES && minute < PEAK_END_UTC_MINUTES;
+      return PEAK_WINDOWS_UTC_MINUTES.some(([start, end]) => minute >= start && minute < end);
     }
 
     /**
@@ -95,14 +178,37 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * The next occurrence of one UTC minute-of-day at or after the reference.
+     * The UTC instant of one minute-of-day a number of UTC days away.
      * @param {number} ms - reference instant.
+     * @param {number} dayOffset - days added to the reference's UTC date.
      * @param {number} minute - minutes since 00:00 UTC.
      * @returns {number} epoch milliseconds.
      */
-    function nextUtcBoundary(ms, minute) {
-      const today = utcBoundary(ms, minute);
-      return ms < today ? today : today + DAY_MS;
+    function utcDayBoundary(ms, dayOffset, minute) {
+      const date = new Date(ms);
+      return Date.UTC(
+        date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate() + dayOffset,
+        Math.floor(minute / 60), minute % 60, 0, 0,
+      );
+    }
+
+    /**
+     * The next instant at which peak status flips, looking far enough ahead to
+     * clear the longest holiday break (the nine-day Spring Festival).
+     * @param {number} ms - epoch milliseconds.
+     * @returns {number} the next transition instant.
+     */
+    function nextTransition(ms) {
+      for (let offset = 0; offset <= 16; offset += 1) {
+        for (const [start, end] of PEAK_WINDOWS_UTC_MINUTES) {
+          for (const minute of [start, end]) {
+            const instant = utcDayBoundary(ms, offset, minute);
+            if (instant <= ms) continue;
+            if (isPeakAt(instant) !== isPeakAt(instant - 1000)) return instant;
+          }
+        }
+      }
+      return ms + 3600000;
     }
 
     /**
@@ -111,14 +217,11 @@ window.__ModuleLoader__.load({
      * @returns {{mode: 'peak' | 'soon' | 'off', target: number, remaining: number}} the state.
      */
     function readState(ms) {
-      if (isPeakAt(ms)) {
-        const target = nextUtcBoundary(ms, PEAK_END_UTC_MINUTES);
-        return { mode: 'peak', target, remaining: target - ms };
-      }
-      const target = nextUtcBoundary(ms, PEAK_START_UTC_MINUTES);
+      const peak = isPeakAt(ms);
+      const target = nextTransition(ms);
       const remaining = target - ms;
       return {
-        mode: remaining <= LEAD_MINUTES * 60000 ? 'soon' : 'off',
+        mode: peak ? 'peak' : remaining <= LEAD_MINUTES * 60000 ? 'soon' : 'off',
         target,
         remaining,
       };
@@ -180,21 +283,14 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * The off-peak window as local clock times.
+     * Both peak windows as local clock times.
      * @param {number} ms - reference instant.
-     * @returns {string} a range such as `20:00 – 04:00`.
-     */
-    function offPeakRange(ms) {
-      return `${clockTime(utcBoundary(ms, PEAK_END_UTC_MINUTES))} – ${clockTime(utcBoundary(ms, PEAK_START_UTC_MINUTES))}`;
-    }
-
-    /**
-     * The peak window as local clock times.
-     * @param {number} ms - reference instant.
-     * @returns {string} a range such as `04:00 – 20:00`.
+     * @returns {string} ranges such as `04:30–07:30, 09:30–13:30`.
      */
     function peakRange(ms) {
-      return `${clockTime(utcBoundary(ms, PEAK_START_UTC_MINUTES))} – ${clockTime(utcBoundary(ms, PEAK_END_UTC_MINUTES))}`;
+      return PEAK_WINDOWS_UTC_MINUTES
+        .map(([start, end]) => `${clockTime(utcBoundary(ms, start))}–${clockTime(utcBoundary(ms, end))}`)
+        .join(', ');
     }
 
     /**
@@ -329,7 +425,7 @@ window.__ModuleLoader__.load({
      * @returns {React.ReactElement} the card.
      */
     function PeakCard(props) {
-      const { t, cardRef, style } = props;
+      const { t, cardRef, cardId, style } = props;
       const now = useNow(CARD_TICK_MS);
       const state = readState(now);
       const remaining = durationParts(state.remaining, t).join(' ');
@@ -340,6 +436,7 @@ window.__ModuleLoader__.load({
 
       return h('div', {
         ref: cardRef,
+        id: cardId,
         className: 'peakr-card',
         style,
         role: 'group',
@@ -378,7 +475,9 @@ window.__ModuleLoader__.load({
         h('span', null, t('axis.end')),
       ),
       h('div', { className: 'peakr-foot' },
-        t('foot.schedule', { range: offPeakRange(now), zone: zoneName() }),
+        isRestDay(now)
+          ? t('foot.rest', { zone: zoneName() })
+          : t('foot.schedule', { range: peakRange(now), zone: zoneName() }),
       ));
     }
 
@@ -393,6 +492,7 @@ window.__ModuleLoader__.load({
       const state = readState(now);
       const status = t('status.' + state.mode);
       const summary = `${status} · ${t('caption.' + state.mode)} ${durationParts(state.remaining, t).join(' ')}`;
+      const cardId = `peakr-card-${React.useId().replaceAll(':', '')}`;
       const [position, setPosition] = React.useState(null);
       const triggerRef = React.useRef(null);
       const cardRef = React.useRef(null);
@@ -406,27 +506,35 @@ window.__ModuleLoader__.load({
 
       React.useEffect(() => {
         if (!open) return undefined;
+        const inside = target => (triggerRef.current !== null && triggerRef.current.contains(target))
+          || (cardRef.current !== null && cardRef.current.contains(target));
         const dismiss = event => {
-          const target = event.target;
-          if (triggerRef.current !== null && triggerRef.current.contains(target)) return;
-          if (cardRef.current !== null && cardRef.current.contains(target)) return;
+          if (inside(event.target)) return;
           setPosition(null);
         };
         const escape = event => {
           if (event.key !== 'Escape') return;
+          if (!inside(document.activeElement)) return;
           setPosition(null);
           triggerRef.current?.focus();
         };
-        const resize = () => { setPosition(null); };
+        const focusLeft = event => {
+          // Focus falling back to the document is a blur, not a move to another
+          // control; the pointer handler above owns that case.
+          if (inside(event.target) || event.target === document.body) return;
+          setPosition(null);
+        };
         document.addEventListener('pointerdown', dismiss, true);
         document.addEventListener('keydown', escape);
-        window.addEventListener('resize', resize);
+        document.addEventListener('focusin', focusLeft);
+        window.addEventListener('resize', place);
         return () => {
           document.removeEventListener('pointerdown', dismiss, true);
           document.removeEventListener('keydown', escape);
-          window.removeEventListener('resize', resize);
+          document.removeEventListener('focusin', focusLeft);
+          window.removeEventListener('resize', place);
         };
-      }, [open]);
+      }, [open, place]);
 
       return h('div', { className: 'peakr-root' },
         h(Style),
@@ -437,13 +545,14 @@ window.__ModuleLoader__.load({
           title: summary,
           'aria-label': summary,
           'aria-expanded': open,
+          'aria-controls': open ? cardId : undefined,
           onClick: () => {
             if (open) { setPosition(null); return; }
             place();
           },
         }, h('span', { className: 'peakr-dot', 'data-mode': state.mode })),
         open
-          ? mountFloating(h(PeakCard, { t, cardRef, style: position }))
+          ? mountFloating(h(PeakCard, { t, cardRef, cardId, style: position }))
           : null,
       );
     }
@@ -459,14 +568,20 @@ window.__ModuleLoader__.load({
       copy.current = t;
       const [notice, setNotice] = React.useState(null);
       const lastMode = React.useRef(readState(Date.now()).mode);
+      const lastTick = React.useRef(Date.now());
 
       React.useEffect(() => {
         const tick = () => {
-          const next = readState(Date.now());
+          const now = Date.now();
+          const next = readState(now);
           const before = lastMode.current;
+          // A long gap means the window was throttled or the machine slept:
+          // the boundary may be hours old, so it is history, not news.
+          const fresh = now - lastTick.current <= STATUS_TICK_MS * 2.5;
           lastMode.current = next.mode;
-          if (before !== 'peak' && next.mode === 'peak') {
-            setNotice({ id: Date.now(), remaining: next.remaining });
+          lastTick.current = now;
+          if (fresh && before !== 'peak' && next.mode === 'peak') {
+            setNotice({ id: now, remaining: next.remaining });
           }
         };
         const timer = setInterval(tick, STATUS_TICK_MS);
@@ -513,17 +628,24 @@ window.__ModuleLoader__.load({
 .peakr-trigger[aria-expanded='true'] { background: var(--dsw-alias-interactive-bg-hover); }
 
 .peakr-dot {
-  position: relative; display: inline-block; width: 9px; height: 9px;
+  position: relative; display: inline-block; width: 10px; height: 10px;
   border-radius: 50%; flex: none;
   transition: background-color 220ms ease;
+  /* A hairline in the label ink keeps the hue from carrying the state alone
+     and holds the dot's edge on both themes. */
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--dsw-alias-label-primary) 26%, transparent);
 }
 .peakr-dot[data-mode='peak'] {
   background: var(--dsw-alias-state-error-primary);
-  box-shadow: 0 0 7px 1px color-mix(in srgb, var(--dsw-alias-state-error-primary) 45%, transparent);
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--dsw-alias-label-primary) 26%, transparent),
+    0 0 7px 1px color-mix(in srgb, var(--dsw-alias-state-error-primary) 50%, transparent);
 }
 .peakr-dot[data-mode='soon'] {
   background: var(--dsw-alias-state-warn-primary);
-  box-shadow: 0 0 6px 1px color-mix(in srgb, var(--dsw-alias-state-warn-primary) 35%, transparent);
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--dsw-alias-label-primary) 26%, transparent),
+    0 0 0 3.5px color-mix(in srgb, var(--dsw-alias-state-warn-primary) 38%, transparent);
 }
 .peakr-dot[data-mode='off'] { background: var(--dsw-alias-state-success-primary); }
 
@@ -544,6 +666,7 @@ window.__ModuleLoader__.load({
   position: fixed; z-index: 120; box-sizing: border-box;
   direction: ltr; text-align: left;
   padding: 12px 14px 11px; border-radius: 16px;
+  overflow: auto;
   background: var(--dsw-specific-menu);
   backdrop-filter: var(--dsw-menu-backdrop-filter);
   box-shadow: var(--dsw-elevation-prominent);
@@ -554,7 +677,7 @@ window.__ModuleLoader__.load({
 .peakr-head { display: flex; align-items: center; gap: 8px; }
 .peakr-title { font-weight: 600; }
 .peakr-count { display: flex; flex-direction: column; gap: 1px; margin-top: 10px; }
-.peakr-caption { color: var(--dsw-alias-label-tertiary); font-size: 11px; }
+.peakr-caption { color: var(--dsw-alias-label-secondary); font-size: 11px; }
 .peakr-value {
   font-size: 22px; line-height: 28px; font-weight: 600; letter-spacing: -.01em;
   font-variant-numeric: tabular-nums;
@@ -566,10 +689,10 @@ window.__ModuleLoader__.load({
 }
 .peakr-seg { height: 100%; min-width: 1px; }
 .peakr-seg[data-k='peak'] {
-  background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 62%, transparent);
+  background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 78%, transparent);
 }
 .peakr-seg[data-k='off'] {
-  background: color-mix(in srgb, var(--dsw-alias-state-success-primary) 42%, transparent);
+  background: color-mix(in srgb, var(--dsw-alias-state-success-primary) 58%, transparent);
 }
 .peakr-marker {
   position: absolute; top: -3px; width: 2px; height: 16px; margin-left: -1px;
@@ -578,15 +701,15 @@ window.__ModuleLoader__.load({
 }
 .peakr-axis {
   display: flex; justify-content: space-between; margin-top: 6px;
-  color: var(--dsw-alias-label-tertiary); font-size: 10px; line-height: 14px;
+  color: var(--dsw-alias-label-secondary); font-size: 11px; line-height: 15px;
 }
 .peakr-foot {
   margin-top: 10px; padding-top: 9px; border-top: 1px solid var(--dsw-alias-border-l1);
-  color: var(--dsw-alias-label-tertiary); font-size: 11px; line-height: 16px;
+  color: var(--dsw-alias-label-secondary); font-size: 11px; line-height: 16px;
 }
 
 .peakr-toast {
-  position: fixed; z-index: 130; left: 50%; pointer-events: auto; cursor: default;
+  position: fixed; z-index: 130; left: 50%; pointer-events: auto; cursor: pointer;
   direction: ltr; text-align: left;
   top: max(16px, var(--dsh-frame-overlay-top, 16px));
   display: flex; align-items: center; gap: 9px;
