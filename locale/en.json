@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "Peak reminder",
+    "description": "Shows a status dot in the conversation header for the DeepSeek API price windows: red with a pulse during peak hours, amber in the 30 minutes before peak starts, and green during off-peak. Click the dot for a countdown, a 24-hour ribbon, and the off-peak schedule; a one-time toast announces the moment peak begins. Peak is 00:30–16:30 UTC and off-peak is 16:30–00:30 UTC, shown in your local time zone. Everything is computed from the local clock: the plugin sends no requests and reads no session data.",
+    "detail": "docs/DETAIL.md"
+  }
+}

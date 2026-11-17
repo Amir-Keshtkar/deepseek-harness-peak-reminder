@@ -1,0 +1,3 @@
+- insert:
+    - id: peak-reminder
+      name: '@local/peak-reminder'
