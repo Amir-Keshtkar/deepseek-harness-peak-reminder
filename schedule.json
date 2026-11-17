@@ -1,0 +1,7 @@
+{
+  "source": "https://api-docs.deepseek.com/quick_start/pricing.md",
+  "windows": [
+    [60, 240],
+    [360, 600]
+  ]
+}

@@ -28,7 +28,7 @@ export function apply(ctx) {
     const run = async () => {
       try {
         const result = await syncSchedule({ write: true });
-        if (disposed || result.status !== 'updated') return;
+        if (disposed || result.status !== 'updated' || !result.clientChanged) return;
         console.log(
           `[peak-reminder] peak windows updated from ${result.url}: `
           + `${result.windows.map(formatWindow).join(', ')} — reload the page to apply`,

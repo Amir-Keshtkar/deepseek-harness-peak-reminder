@@ -27,6 +27,13 @@ const SOURCES = [
 /** The file holding the schedule constants. */
 const CLIENT = fileURLToPath(new URL('../client.js', import.meta.url));
 
+/**
+ * The published copy the plugin fetches at runtime. A packed install cannot be
+ * rewritten, so this file is how a GitHub-installed copy still follows the
+ * current schedule.
+ */
+const MANIFEST = fileURLToPath(new URL('../schedule.json', import.meta.url));
+
 /** A window as it appears in the sentence: `01:00 - 04:00`. */
 const RANGE = () => /(\d{1,2}):(\d{2})\s*[-–—~]\s*(\d{1,2}):(\d{2})/g;
 
@@ -98,6 +105,16 @@ function renderConstant(windows) {
 }
 
 /**
+ * Render the published manifest the browser fetches at runtime.
+ * @param {{url: string, windows: Array<[number, number]>}} official - parsed schedule.
+ * @returns {string} JSON text with a trailing newline.
+ */
+function renderManifest(official) {
+  const rows = official.windows.map(([start, end]) => `    [${start}, ${end}]`).join(',\n');
+  return `{\n  "source": ${JSON.stringify(official.url)},\n  "windows": [\n${rows}\n  ]\n}\n`;
+}
+
+/**
  * Fetch the official schedule without touching any file.
  * @param {number} [timeoutMs] - per-request budget.
  * @returns {Promise<{url: string, sentence: string, windows: Array<[number, number]>, weekdayRule: boolean, holidayRule: boolean}>}
@@ -115,22 +132,38 @@ export async function fetchOfficialSchedule(timeoutMs = 20000) {
  *   previous?: string, next?: string}>} what happened.
  */
 export async function syncSchedule(options = {}) {
-  const { write = true, clientPath = CLIENT, timeoutMs = 20000 } = options;
+  const {
+    write = true, clientPath = CLIENT, manifestPath = MANIFEST, timeoutMs = 20000,
+  } = options;
   const official = await fetchOfficialSchedule(timeoutMs);
   const next = renderConstant(official.windows);
+  const nextManifest = renderManifest(official);
 
   const source = await readFile(clientPath, 'utf8');
   const previous = /const PEAK_WINDOWS_UTC_MINUTES = .*?;/.exec(source)?.[0];
   if (previous === undefined) throw new Error('client.js no longer declares PEAK_WINDOWS_UTC_MINUTES');
 
-  if (previous === next) return { ...official, status: 'unchanged' };
-  if (!write) return { ...official, status: 'stale', previous, next };
+  const previousManifest = await readFile(manifestPath, 'utf8').catch(() => null);
+  const clientFresh = previous === next;
+  const manifestFresh = previousManifest === nextManifest;
+
+  if (clientFresh && manifestFresh) return { ...official, status: 'unchanged', clientChanged: false };
+  if (!write) {
+    return {
+      ...official, status: 'stale', clientChanged: !clientFresh, previous, next, previousManifest, nextManifest,
+    };
+  }
 
   // Replace through a sibling temporary file so a reader never sees a partial write.
-  const temporary = `${clientPath}.tmp`;
-  await writeFile(temporary, source.replace(previous, next), 'utf8');
-  await rename(temporary, clientPath);
-  return { ...official, status: 'updated', previous, next };
+  if (!clientFresh) {
+    await writeFile(`${clientPath}.tmp`, source.replace(previous, next), 'utf8');
+    await rename(`${clientPath}.tmp`, clientPath);
+  }
+  if (!manifestFresh) {
+    await writeFile(`${manifestPath}.tmp`, nextManifest, 'utf8');
+    await rename(`${manifestPath}.tmp`, manifestPath);
+  }
+  return { ...official, status: 'updated', clientChanged: !clientFresh, previous, next };
 }
 
 /**
@@ -159,9 +192,10 @@ if (isMain) {
     if (!result.holidayRule) {
       console.warn('warning: the official sentence no longer excludes Chinese public holidays; check CHINA_HOLIDAY_RANGES in client.js');
     }
-    if (result.status === 'unchanged') console.log('client.js is up to date');
+    if (result.status === 'unchanged') console.log('client.js and schedule.json are up to date');
     if (result.status === 'updated') {
-      console.log(`client.js updated\n  was: ${result.previous}\n  now: ${result.next}`);
+      console.log(result.clientChanged ? 'client.js updated' : 'schedule.json updated');
+      if (result.clientChanged) console.log(`  was: ${result.previous}\n  now: ${result.next}`);
     }
     if (result.status === 'stale') {
       console.log(`client.js is stale; run without --check to update it\n  was: ${result.previous}\n  now: ${result.next}`);

@@ -54,6 +54,19 @@ window.__ModuleLoader__.load({
     const CARD_GAP = 8;
     const RIBBON_STEPS = 96;
 
+    /**
+     * The published manifest. A packed or GitHub install cannot rewrite its own
+     * files, so the browser follows this file; the built-in constants above stay
+     * authoritative when it is unreachable or malformed.
+     */
+    const REMOTE_SCHEDULE_URL = 'https://raw.githubusercontent.com/Amir-Keshtkar/PeakReminder/main/schedule.json';
+    const REMOTE_CACHE_KEY = 'dsh.peak-reminder.schedule';
+    const REMOTE_TTL_MS = 6 * 3600000;
+    const REMOTE_TIMEOUT_MS = 4000;
+
+    /** Windows in force for this page; replaced by the published manifest when one loads. */
+    let activeWindows = PEAK_WINDOWS_UTC_MINUTES;
+
     const COPY = {
       en: {
         'status.peak': 'Peak hours',
@@ -70,9 +83,19 @@ window.__ModuleLoader__.load({
         'axis.mid': '12:00',
         'axis.end': '24:00',
         'ribbon.label': 'Peak windows: {range}',
+        'boundary.start': 'Peak starts',
+        'boundary.end': 'Peak ends',
         'foot.schedule': 'Peak {range} · Mon–Fri · {zone}',
         'foot.rest': 'Off-peak all day · {zone}',
         'toast.peak': 'Peak hours have started · off-peak in {remaining}',
+        'pref.rtl': 'RTL',
+        'pref.notify': 'Notify',
+        'pref.rtl.aria': 'Right-to-left message text',
+        'pref.notify.aria': 'Desktop notification when a reply or a question arrives',
+        'notify.reply.title': 'DeepSeek replied',
+        'notify.reply.body': 'The response is ready.',
+        'notify.question.title': 'DeepSeek asked a question',
+        'notify.question.body': 'Open DeepSeek Harness to answer.',
       },
       zh: {
         'status.peak': '高峰时段',
@@ -89,9 +112,19 @@ window.__ModuleLoader__.load({
         'axis.mid': '12:00',
         'axis.end': '24:00',
         'ribbon.label': '高峰时段：{range}',
+        'boundary.start': '高峰开始',
+        'boundary.end': '高峰结束',
         'foot.schedule': '高峰 {range} · 周一至周五 · {zone}',
         'foot.rest': '全天非高峰 · {zone}',
         'toast.peak': '高峰时段已开始 · 距非高峰时段还有 {remaining}',
+        'pref.rtl': '从右到左',
+        'pref.notify': '通知',
+        'pref.rtl.aria': '消息文本从右到左',
+        'pref.notify.aria': '收到回复或提问时发送桌面通知',
+        'notify.reply.title': 'DeepSeek 已回复',
+        'notify.reply.body': '回复已准备好。',
+        'notify.question.title': 'DeepSeek 有问题',
+        'notify.question.body': '打开 DeepSeek Harness 回答。',
       },
     };
 
@@ -160,7 +193,7 @@ window.__ModuleLoader__.load({
     function isPeakAt(ms) {
       if (isRestDay(ms)) return false;
       const minute = utcMinute(ms);
-      return PEAK_WINDOWS_UTC_MINUTES.some(([start, end]) => minute >= start && minute < end);
+      return activeWindows.some(([start, end]) => minute >= start && minute < end);
     }
 
     /**
@@ -200,7 +233,7 @@ window.__ModuleLoader__.load({
      */
     function nextTransition(ms) {
       for (let offset = 0; offset <= 16; offset += 1) {
-        for (const [start, end] of PEAK_WINDOWS_UTC_MINUTES) {
+        for (const [start, end] of activeWindows) {
           for (const minute of [start, end]) {
             const instant = utcDayBoundary(ms, offset, minute);
             if (instant <= ms) continue;
@@ -288,9 +321,27 @@ window.__ModuleLoader__.load({
      * @returns {string} ranges such as `04:30–07:30, 09:30–13:30`.
      */
     function peakRange(ms) {
-      return PEAK_WINDOWS_UTC_MINUTES
+      return activeWindows
         .map(([start, end]) => `${clockTime(utcBoundary(ms, start))}–${clockTime(utcBoundary(ms, end))}`)
         .join(', ');
+    }
+
+    /**
+     * The peak boundaries inside the local day around one instant, in order.
+     * @param {number} ms - reference instant.
+     * @returns {number[]} instants at which peak status flips inside that day.
+     */
+    function dayBoundaries(ms) {
+      const [start, end] = localDayBounds(ms);
+      const boundaries = [];
+      let cursor = start - 1;
+      for (let index = 0; index < 8; index += 1) {
+        const instant = nextTransition(cursor);
+        if (instant <= start || instant >= end) break;
+        boundaries.push(instant);
+        cursor = instant;
+      }
+      return boundaries;
     }
 
     /**
@@ -338,6 +389,66 @@ window.__ModuleLoader__.load({
       return Math.min(100, Math.max(0, ((ms - start) / span) * 100));
     }
 
+    /**
+     * Accept only a plausible window list from the published manifest.
+     * @param {unknown} value - the decoded JSON field.
+     * @returns {Array<[number, number]> | null} sorted windows, or null when unusable.
+     */
+    function normalizeWindows(value) {
+      if (!Array.isArray(value) || value.length === 0 || value.length > 4) return null;
+      const windows = [];
+      for (const pair of value) {
+        if (!Array.isArray(pair) || pair.length !== 2) return null;
+        const [start, end] = pair;
+        if (!Number.isInteger(start) || !Number.isInteger(end)) return null;
+        if (start < 0 || end > 1440 || start >= end) return null;
+        windows.push([start, end]);
+      }
+      windows.sort((a, b) => a[0] - b[0]);
+      for (let index = 1; index < windows.length; index += 1) {
+        if (windows[index][0] < windows[index - 1][1]) return null;
+      }
+      return windows;
+    }
+
+    /**
+     * Adopt the published schedule, preferring a fresh fetch over a cached copy.
+     * Every failure path leaves the windows already in force untouched.
+     * @returns {Promise<void>} resolves once the attempt settles.
+     */
+    async function refreshSchedule() {
+      try {
+        const raw = localStorage.getItem(REMOTE_CACHE_KEY);
+        if (raw !== null) {
+          const cached = JSON.parse(raw);
+          const windows = normalizeWindows(cached?.windows);
+          if (windows !== null && typeof cached.at === 'number' && Date.now() - cached.at < REMOTE_TTL_MS) {
+            activeWindows = windows;
+          }
+        }
+      } catch {
+        // A missing or unusable cache is not a failure.
+      }
+
+      try {
+        const response = await fetch(REMOTE_SCHEDULE_URL, {
+          cache: 'no-store',
+          signal: AbortSignal.timeout(REMOTE_TIMEOUT_MS),
+        });
+        if (!response.ok) return;
+        const windows = normalizeWindows((await response.json()).windows);
+        if (windows === null) return;
+        activeWindows = windows;
+        try {
+          localStorage.setItem(REMOTE_CACHE_KEY, JSON.stringify({ at: Date.now(), windows }));
+        } catch {
+          // Storage may be unavailable; the in-memory value still applies.
+        }
+      } catch {
+        // Offline or blocked: keep the built-in or cached windows.
+      }
+    }
+
     /* --------------------------------------------------------------------- *
      * Portal: optional, so the bundle still works without react-dom
      * --------------------------------------------------------------------- */
@@ -381,6 +492,125 @@ window.__ModuleLoader__.load({
       return now;
     }
 
+    /* --------------------------------------------------------------------- *
+     * Preferences, notifications, and the global surface
+     * --------------------------------------------------------------------- */
+
+    const PREF_KEY = 'dsh.peak-reminder.prefs';
+
+    /** Durable switches shared by the card and the global surface. */
+    const prefStore = (() => {
+      let state = { rtl: true, notify: true };
+      try {
+        const raw = localStorage.getItem(PREF_KEY);
+        if (raw !== null) {
+          const saved = JSON.parse(raw);
+          state = {
+            rtl: typeof saved.rtl === 'boolean' ? saved.rtl : state.rtl,
+            notify: typeof saved.notify === 'boolean' ? saved.notify : state.notify,
+          };
+        }
+      } catch {
+        // Private or full storage keeps the defaults for this page.
+      }
+      const listeners = new Set();
+      return {
+        get: () => state,
+        set(patch) {
+          state = { ...state, ...patch };
+          try {
+            localStorage.setItem(PREF_KEY, JSON.stringify(state));
+          } catch {
+            // The switch still applies to this page.
+          }
+          for (const listener of listeners) listener();
+        },
+        subscribe(listener) {
+          listeners.add(listener);
+          return () => { listeners.delete(listener); };
+        },
+      };
+    })();
+
+    /**
+     * Read the durable switches from React.
+     * @returns {{rtl: boolean, notify: boolean}} the current preferences.
+     */
+    function usePrefs() {
+      return React.useSyncExternalStore(prefStore.subscribe, prefStore.get);
+    }
+
+    /**
+     * Show one desktop notification, unless the window is already in front.
+     * @param {string} title - headline text.
+     * @param {string} body - supporting text.
+     * @returns {void}
+     */
+    function showNotification(title, body) {
+      if (!prefStore.get().notify) return;
+      if (typeof Notification === 'undefined') return;
+      if (document.visibilityState === 'visible' && document.hasFocus()) return;
+      try {
+        if (Notification.permission !== 'granted' && Notification.permission !== 'default') return;
+        const notice = new Notification(title, { body, tag: 'dsh-peak-reminder' });
+        notice.onclick = () => { window.focus(); notice.close(); };
+      } catch {
+        // A blocked or unsupported notification surface is not an error.
+      }
+    }
+
+    /**
+     * Watch session status and announce a finished reply or a new question.
+     * @param {{useSessionStatus: Function, t: Function}} props - the status hook and copy.
+     * @returns {null} renders nothing.
+     */
+    function PeakNotifier(props) {
+      const { useSessionStatus, t } = props;
+      const statuses = useSessionStatus(value => value);
+      const seen = React.useRef(new Map());
+
+      React.useEffect(() => {
+        const next = new Map();
+        let replied = false;
+        let asked = false;
+        for (const [sessionId, status] of statuses) {
+          const before = seen.current.get(sessionId);
+          const pending = status.pendingInteraction;
+          const question = pending !== undefined && pending !== null && pending.kind === 'question'
+            ? pending.key
+            : null;
+          next.set(sessionId, { running: status.running === true, question });
+          if (before === undefined) continue;
+          if (before.running && status.running !== true) replied = true;
+          if (question !== null && question !== before.question) asked = true;
+        }
+        seen.current = next;
+        if (asked) {
+          showNotification(t('notify.question.title'), t('notify.question.body'));
+          return;
+        }
+        if (replied) showNotification(t('notify.reply.title'), t('notify.reply.body'));
+      }, [statuses, t]);
+
+      return null;
+    }
+
+    /**
+     * Root-scoped surface: the RTL stylesheet and the notification watcher.
+     * @param {{t: Function, useSessionStatus?: Function}} props - copy and the status hook.
+     * @returns {React.ReactElement | null} the stylesheet while RTL is on.
+     */
+    function PeakGlobal(props) {
+      const { t, useSessionStatus } = props;
+      const prefs = usePrefs();
+      return h(React.Fragment, null,
+        prefs.rtl ? h('style', { 'data-peak-reminder': 'rtl' }, RTL_CSS) : null,
+        typeof useSessionStatus === 'function'
+          ? h(PeakNotifier, { useSessionStatus, t })
+          : null,
+      );
+    }
+
     /**
      * The component-local stylesheet: mounted and removed with its component.
      * @returns {React.ReactElement} a style element.
@@ -399,7 +629,7 @@ window.__ModuleLoader__.load({
     function cardPosition(rect) {
       const width = Math.min(CARD_WIDTH, window.innerWidth - 16);
       const left = Math.max(8, Math.min(rect.right - width, window.innerWidth - width - 8));
-      const estimated = 210;
+      const estimated = 250;
       const below = rect.bottom + CARD_GAP;
       const fitsBelow = below + estimated <= window.innerHeight - 8;
       if (!fitsBelow && rect.top - CARD_GAP - estimated >= 8) {
@@ -433,6 +663,9 @@ window.__ModuleLoader__.load({
       // tick rebuilds the countdown and marker without rebuilding it.
       const dayStart = localDayBounds(now)[0];
       const runs = React.useMemo(() => ribbonRuns(now), [dayStart]);
+      const boundaries = React.useMemo(() => dayBoundaries(now), [dayStart]);
+      const [tip, setTip] = React.useState(null);
+      const prefs = usePrefs();
 
       return h('div', {
         ref: cardRef,
@@ -468,6 +701,34 @@ window.__ModuleLoader__.load({
           style: { left: `${dayProgress(now)}%` },
           'aria-hidden': 'true',
         }),
+        boundaries.map((instant, index) => {
+          const left = dayProgress(instant);
+          const opens = isPeakAt(instant);
+          const label = `${t(opens ? 'boundary.start' : 'boundary.end')} · ${clockTime(instant)}`;
+          const show = () => { setTip({ key: index, left, label }); };
+          const hide = () => {
+            setTip(current => (current !== null && current.key === index ? null : current));
+          };
+          return h('span', {
+            key: index,
+            className: 'peakr-boundary',
+            style: { left: `${left}%` },
+            tabIndex: 0,
+            role: 'note',
+            'aria-label': label,
+            onMouseEnter: show,
+            onMouseLeave: hide,
+            onFocus: show,
+            onBlur: hide,
+          });
+        }),
+        tip === null
+          ? null
+          : h('span', {
+            className: 'peakr-tip',
+            style: { left: `${tip.left}%` },
+            role: 'tooltip',
+          }, tip.label),
       ),
       h('div', { className: 'peakr-axis', 'aria-hidden': 'true' },
         h('span', null, t('axis.start')),
@@ -478,6 +739,30 @@ window.__ModuleLoader__.load({
         isRestDay(now)
           ? t('foot.rest', { zone: zoneName() })
           : t('foot.schedule', { range: peakRange(now), zone: zoneName() }),
+      ),
+      h('div', { className: 'peakr-prefs' },
+        h('button', {
+          type: 'button',
+          role: 'switch',
+          className: 'peakr-switch',
+          'aria-checked': prefs.rtl,
+          'aria-label': t('pref.rtl.aria'),
+          onClick: () => { prefStore.set({ rtl: !prefs.rtl }); },
+        },
+        h('span', { className: 'peakr-knob', 'data-on': prefs.rtl }),
+        h('span', null, t('pref.rtl')),
+        ),
+        h('button', {
+          type: 'button',
+          role: 'switch',
+          className: 'peakr-switch',
+          'aria-checked': prefs.notify,
+          'aria-label': t('pref.notify.aria'),
+          onClick: () => { prefStore.set({ notify: !prefs.notify }); },
+        },
+        h('span', { className: 'peakr-knob', 'data-on': prefs.notify }),
+        h('span', null, t('pref.notify')),
+        ),
       ));
     }
 
@@ -613,6 +898,40 @@ window.__ModuleLoader__.load({
      * Styles — theme tokens only, so light and dark stay consistent.
      * --------------------------------------------------------------------- */
 
+    /**
+     * Direction overrides for conversation text. Every selector is a stable
+     * attribute or a CSS-module local name; code and formulas stay left to
+     * right so blocks, equations, and diffs keep their meaning.
+     */
+    const RTL_CSS = `
+[data-chat-flow-kind="assistant-step"] [class*="_markdown"],
+[data-chat-flow-kind="user"] [class*="_markdown"],
+[data-chat-flow-kind="steering"] [class*="_markdown"],
+[data-message-bubble],
+[data-row-key^="session:"] [class*="_title"],
+[data-row-key^="workspace:"] [class*="_title"],
+[data-question-key],
+[data-question-key] [role="radiogroup"],
+[data-question-key] [role="group"],
+[data-question-key] [data-option-row],
+[data-question-key] [data-option-line],
+[data-question-key] [data-option-description] {
+  direction: rtl;
+  text-align: start;
+}
+[data-chat-flow-kind] [data-code-wrap],
+[data-chat-flow-kind] pre,
+[data-chat-flow-kind] code,
+[data-question-key] code,
+.katex-display,
+.peakr-card,
+.peakr-toast,
+.peakr-tip {
+  direction: ltr;
+  text-align: left;
+}
+`;
+
     const CSS = `
 .peakr-root { display: inline-flex; align-items: center; }
 .peakr-trigger {
@@ -699,6 +1018,34 @@ window.__ModuleLoader__.load({
   border-radius: 2px; background: var(--dsw-alias-label-primary);
   box-shadow: 0 0 0 2px var(--dsw-specific-menu);
 }
+/* Only the points where peak flips are hover targets, not the whole ribbon. */
+.peakr-boundary {
+  position: absolute; top: -5px; width: 18px; height: 20px; margin-left: -9px;
+  border-radius: 6px; cursor: help;
+}
+.peakr-boundary:hover,
+.peakr-boundary:focus-visible {
+  background: color-mix(in srgb, var(--dsw-alias-label-primary) 10%, transparent);
+}
+.peakr-boundary::before {
+  content: ''; position: absolute; left: 50%; top: 5px; width: 1px; height: 10px;
+  margin-left: -0.5px; border-radius: 1px; pointer-events: none;
+  background: color-mix(in srgb, var(--dsw-alias-label-primary) 26%, transparent);
+}
+.peakr-boundary:focus-visible {
+  outline: 2px solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));
+  outline-offset: -1px;
+}
+.peakr-tip {
+  position: absolute; bottom: calc(100% + 4px); left: 0; z-index: 3;
+  transform: translateX(-50%); pointer-events: none; white-space: nowrap;
+  padding: 3px 8px; border-radius: 8px;
+  background: var(--dsw-specific-menu);
+  color: var(--dsw-alias-label-primary);
+  outline: 1px solid var(--dsw-alias-border-l1);
+  box-shadow: var(--dsw-elevation-prominent);
+  font-size: 11px; line-height: 16px; font-variant-numeric: tabular-nums;
+}
 .peakr-axis {
   display: flex; justify-content: space-between; margin-top: 6px;
   color: var(--dsw-alias-label-secondary); font-size: 11px; line-height: 15px;
@@ -707,6 +1054,31 @@ window.__ModuleLoader__.load({
   margin-top: 10px; padding-top: 9px; border-top: 1px solid var(--dsw-alias-border-l1);
   color: var(--dsw-alias-label-secondary); font-size: 11px; line-height: 16px;
 }
+.peakr-prefs { display: flex; flex-wrap: wrap; gap: 4px; margin: 8px 0 0 -4px; }
+.peakr-switch {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 3px 9px 3px 5px; border: 0; border-radius: 999px;
+  background: transparent; color: var(--dsw-alias-label-secondary);
+  font: inherit; font-size: 11px; line-height: 16px; cursor: pointer;
+}
+.peakr-switch:hover { background: var(--dsw-alias-interactive-bg-hover); }
+.peakr-switch:focus-visible {
+  outline: 2px solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));
+  outline-offset: 1px;
+}
+.peakr-knob {
+  position: relative; flex: none; width: 18px; height: 10px; border-radius: 999px;
+  background: var(--dsw-alias-border-l1);
+  transition: background-color 160ms ease;
+}
+.peakr-knob::after {
+  content: ''; position: absolute; top: 1px; left: 1px; width: 8px; height: 8px;
+  border-radius: 50%; background: var(--dsw-specific-menu);
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--dsw-alias-label-primary) 35%, transparent);
+  transition: transform 160ms ease;
+}
+.peakr-knob[data-on='true'] { background: var(--dsw-alias-state-business-primary); }
+.peakr-knob[data-on='true']::after { transform: translateX(8px); }
 
 .peakr-toast {
   position: fixed; z-index: 130; left: 50%; pointer-events: auto; cursor: pointer;
@@ -743,6 +1115,12 @@ window.__ModuleLoader__.load({
       apply(ctx) {
         ctx.effect(() => ctx.locale.register(NS, COPY), 'peak-reminder: copy');
 
+        ctx.effect(() => {
+          void refreshSchedule();
+          const timer = setInterval(() => { void refreshSchedule(); }, REMOTE_TTL_MS);
+          return () => { clearInterval(timer); };
+        }, 'peak-reminder: published schedule');
+
         ctx.slots.inject('conversation.session.header.utilities', () => ctx.slots.register({
           name: 'conversation.session.header.utilities',
           id: 'peak-reminder',
@@ -756,6 +1134,13 @@ window.__ModuleLoader__.load({
           order: 40,
           locale: NS,
         }, PeakToast));
+
+        ctx.slots.inject('shell.overlay', () => ctx.slots.register({
+          name: 'shell.overlay',
+          id: 'peak-reminder.global',
+          order: 39,
+          locale: NS,
+        }, PeakGlobal));
       },
     };
   },

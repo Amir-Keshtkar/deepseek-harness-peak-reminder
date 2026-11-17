@@ -1,6 +1,6 @@
 {
   "name": "@local/peak-reminder",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "private": true,
   "type": "module",
   "description": "Reminds you when DeepSeek API peak hours are active.",
@@ -17,6 +17,7 @@
     "index.js",
     "client.js",
     "cordis.patch.yml",
+    "schedule.json",
     "locale/*.json",
     "docs",
     "scripts",
