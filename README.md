@@ -22,7 +22,7 @@ Click it for a card with the countdown to the next change, a 24-hour ribbon of t
 
 **Notifications.** A desktop notification arrives when a reply finishes or when the agent asks a question, so you can work elsewhere while DeepSeek runs. The window is left alone while it has focus, where the conversation already shows the result.
 
-**Usage.** A compact cell sits in the sidebar foot, directly above the account row, showing this session's token total and estimated cost. Click it for the input, cached, and output buckets, decode speed, turn count with total model time, the model when the session reports one, and the basis of the estimate. Below them, in its own tinted band so it never reads as a session metric, is the account balance: the charged total as the headline, with the topped-up and the granted wallets on the line under it. It is read from the account service when the plugin loads and again each time the panel opens. Cost comes from DeepSeek's published per-million rates, doubled inside a peak window; it is an estimate, not a bill.
+**Usage.** A compact cell sits in the sidebar foot, directly above the account row, showing this session's token total and estimated cost. Click it for the input, cached, and output buckets, decode speed, turn count with total model time, the model when the session reports one, and the basis of the estimate. Below them, in its own tinted band so it never reads as a session metric, is the account's remaining balance — with granted credit on a second line when there is any — read from the account service each time the panel opens. Cost comes from DeepSeek's published per-million rates, doubled inside a peak window; it is an estimate, not a bill.
 
 **Right-to-left text.** Answers, the questions you write, the session-list titles, the agent's multi-choice questions with their options, and Markdown files opened from the files panel all read right to left. Code blocks, YAML frontmatter, and formulas stay left to right. All three switches live in the card and are remembered per browser.
 
@@ -135,7 +135,7 @@ No. It reads token counters the app already publishes and renders text it was gi
 - The RTL selectors match attribute hooks and CSS-module local names; a rename upstream would narrow them, not break rendering.
 - The usage cost is an estimate at the rate in force when the panel is read: a session that spans a peak boundary is not split between the two rates. The price table is shipped with the plugin.
 - The usage cell is hidden while the sidebar is collapsed, because the whole sidebar foot is hidden on this desktop build.
-- The balance band needs a signed-in account and a permitted account read; otherwise it says so instead of guessing. The Platform reports the credit left in the account, not a lifetime total of top-ups.
+- The balance band needs a signed-in account and a permitted account read; otherwise it says so instead of guessing.
 - Chinese holiday dates are a maintained list, as noted above.
 
 ## Layout

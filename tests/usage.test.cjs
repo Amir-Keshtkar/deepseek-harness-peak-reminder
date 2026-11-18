@@ -17,7 +17,7 @@ assert.ok(start > 0 && end > start, 'could not slice the usage helpers out of cl
 const api = new Function(`${source.slice(start, end)}
 return {
   priceFamily, estimateCost, formatTokens, formatCost, formatDuration,
-  currentSessionId, formatMoney, balanceText, sumWallets, createStore, PRICE_TABLE,
+  currentSessionId, formatMoney, balanceText, createStore, PRICE_TABLE,
 };`)();
 
 // Model → price family.
@@ -78,17 +78,6 @@ assert.strictEqual(api.balanceText([{ balance: '0', currency: 'CNY' }, { balance
 assert.strictEqual(api.balanceText([]), null);
 assert.strictEqual(api.balanceText(undefined), null);
 assert.strictEqual(api.balanceText([{}]), null);
-
-// Wallet totals add the charged and granted wallets into the headline figure.
-assert.deepStrictEqual(api.sumWallets([{ balance: '10', currency: 'USD' }], [{ balance: '2.34', currency: 'USD' }]),
-  [{ currency: 'USD', balance: '12.34' }]);
-assert.deepStrictEqual(api.sumWallets([{ balance: '5', currency: 'CNY' }], undefined),
-  [{ currency: 'CNY', balance: '5' }]);
-assert.deepStrictEqual(api.sumWallets([], []), []);
-assert.deepStrictEqual(api.sumWallets([{ balance: '0', currency: 'CNY' }, { balance: '3.2', currency: 'CNY' }], []),
-  [{ currency: 'CNY', balance: '3.2' }]);
-assert.strictEqual(api.balanceText(api.sumWallets([{ balance: '10', currency: 'USD' }], [{ balance: '2.34', currency: 'USD' }])),
-  '$12.34');
 
 // The store publishes only real changes.
 const store = api.createStore(1);
