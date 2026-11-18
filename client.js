@@ -110,6 +110,8 @@ window.__ModuleLoader__.load({
         'usage.estimate': 'Estimated at current rates',
         'usage.tokps': '{n} tok/s',
         'balance.label': 'Balance',
+        'balance.total': 'Total balance',
+        'balance.toppedUp': 'Topped up',
         'balance.granted': 'Granted',
         'balance.signedOut': 'Sign in to view',
         'balance.unavailable': 'Unavailable',
@@ -156,6 +158,8 @@ window.__ModuleLoader__.load({
         'usage.estimate': '按当前价格估算',
         'usage.tokps': '{n} tok/s',
         'balance.label': '余额',
+        'balance.total': '总余额',
+        'balance.toppedUp': '充值',
         'balance.granted': '赠送',
         'balance.signedOut': '登录后查看',
         'balance.unavailable': '不可用',
@@ -809,6 +813,31 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * Add wallet rows together, one total per currency. The Platform reports
+     * the topped-up and the granted credit separately; the account's total is
+     * their sum in the currency each wallet is denominated in.
+     * @param {...unknown} groups - wallet arrays from the account service.
+     * @returns {{currency: string, balance: string}[]} one row per currency.
+     */
+    function sumWallets(...groups) {
+      const totals = new Map();
+      for (const group of groups) {
+        if (!Array.isArray(group)) continue;
+        for (const wallet of group) {
+          if (wallet === null || typeof wallet !== 'object') continue;
+          const amount = Number(wallet.balance);
+          if (!Number.isFinite(amount)) continue;
+          const currency = wallet.currency === 'CNY' ? 'CNY' : 'USD';
+          totals.set(currency, (totals.get(currency) ?? 0) + amount);
+        }
+      }
+      return [...totals].map(([currency, amount]) => ({
+        currency,
+        balance: String(Math.round(amount * 100) / 100),
+      }));
+    }
+
+    /**
      * One labelled row in the usage panel.
      * @param {{label: string, value: string, hint?: string}} props - row content.
      * @returns {React.ReactElement} the row.
@@ -828,27 +857,39 @@ window.__ModuleLoader__.load({
 
     /**
      * The account balance, kept in its own tinted band so it never reads as a
-     * session metric.
+     * session metric. The headline is the charged total (topped-up plus granted
+     * wallets) and the line below names both parts. The band always renders, so
+     * a slow or refused account read is visible instead of silently absent.
      * @param {{t: Function, balance: object | undefined}} props - copy and the balance snapshot.
-     * @returns {React.ReactElement | null} the band, or nothing while unread.
+     * @returns {React.ReactElement} the band.
      */
     function BalanceBand(props) {
       const { t, balance } = props;
-      if (balance === undefined || balance === null) return null;
+      const unread = balance === undefined || balance === null;
+      const ready = !unread && balance.status === 'ready';
 
       let main;
       let extra = null;
-      if (balance.status === 'ready') {
-        main = balanceText(balance.value) ?? formatMoney('0', 'USD');
-        const bonus = balanceText(balance.bonusWallets);
-        if (bonus !== null && bonus !== formatMoney('0', 'USD')) extra = `${t('balance.granted')} ${bonus}`;
+      if (ready) {
+        main = balanceText(sumWallets(balance.value, balance.bonusWallets)) ?? formatMoney('0', 'USD');
+        const toppedUp = balanceText(balance.value);
+        const granted = balanceText(balance.bonusWallets);
+        const parts = [];
+        if (toppedUp !== null) parts.push(`${t('balance.toppedUp')} ${toppedUp}`);
+        if (granted !== null) parts.push(`${t('balance.granted')} ${granted}`);
+        if (parts.length > 0) extra = parts.join(' · ');
+      } else if (unread) {
+        main = '…';
       } else if (balance.status === 'signedOut') {
         main = t('balance.signedOut');
       } else {
         main = t('balance.unavailable');
       }
 
-      return h('div', { className: 'peakr-balance' },
+      return h('div', {
+        className: 'peakr-balance',
+        'data-peakr-balance': unread ? 'loading' : balance.status,
+      },
         h('span', { className: 'peakr-balance-key' },
           h('svg', {
             width: 12, height: 12, viewBox: '0 0 16 16', 'aria-hidden': 'true', className: 'peakr-balance-icon',
@@ -858,10 +899,10 @@ window.__ModuleLoader__.load({
           }),
           h('circle', { cx: 11, cy: 8.5, r: 1.1, fill: 'currentColor' }),
           ),
-          t('balance.label'),
+          t(ready ? 'balance.total' : 'balance.label'),
         ),
         h('span', {
-          className: balance.status === 'ready' ? 'peakr-balance-value' : 'peakr-balance-value is-muted',
+          className: ready ? 'peakr-balance-value' : 'peakr-balance-value is-muted',
         }, main),
         extra === null ? null : h('span', { className: 'peakr-balance-extra' }, extra),
       );
@@ -916,7 +957,7 @@ window.__ModuleLoader__.load({
       const place = React.useCallback(() => {
         const trigger = triggerRef.current;
         if (trigger === null) return;
-        if (typeof refreshBalance === 'function') refreshBalance();
+        if (typeof refreshBalance === 'function') refreshBalance(true);
         const rect = trigger.getBoundingClientRect();
         const width = Math.min(252, window.innerWidth - 16);
         setPosition({
@@ -1630,7 +1671,13 @@ window.__ModuleLoader__.load({
           const read = async () => {
             try {
               const account = scope.accountUi.getSnapshot();
-              if (account?.view?.status !== 'credential-stored') {
+              if (account === undefined || account.view === undefined) {
+                // The account stream has not published yet; keep the band in
+                // its loading state instead of claiming the user is signed out.
+                balanceStore.set(undefined);
+                return;
+              }
+              if (account.view.status !== 'credential-stored') {
                 balanceStore.set({ status: 'signedOut' });
                 return;
               }
@@ -1645,15 +1692,27 @@ window.__ModuleLoader__.load({
               balanceStore.set({ status: 'failed' });
             }
           };
-          refreshBalance = () => {
+          refreshBalance = force => {
             if (inflight !== null) return;
             const current = balanceStore.getSnapshot();
-            const retry = current === undefined || current?.status === 'failed';
+            // An unread, failed, or signed-out snapshot is worth retrying; a
+            // ready one is cached for a minute unless the panel asks for a
+            // fresh read. The short floor also absorbs double-open events.
+            const retry = current === undefined || current?.status === 'failed' || current?.status === 'signedOut';
             const now = Date.now();
-            if (!retry && now - lastRead < 60000) return;
+            if (force !== true && !retry && now - lastRead < 60000) return;
+            if (now - lastRead < 3000) return;
             lastRead = now;
             inflight = read().finally(() => { inflight = null; });
           };
+          // Fill the band as soon as the account services are ready, and again
+          // whenever the account stream changes (sign-in, sign-out, refresh),
+          // without waiting for the panel to be opened.
+          refreshBalance();
+          scope.effect(() => {
+            const off = scope.on('account-ui/change', () => { refreshBalance(true); });
+            return () => { off(); };
+          }, 'peak-reminder: balance on account change');
         });
 
         ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register({
@@ -1664,7 +1723,7 @@ window.__ModuleLoader__.load({
           label: () => t('usage.label'),
           inject: () => ({
             hooks: { balance: balanceStore },
-            refreshBalance: () => { refreshBalance(); },
+            refreshBalance: force => { refreshBalance(force === true); },
           }),
         }, UsageEntry));
       },

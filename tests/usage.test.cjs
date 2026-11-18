@@ -17,7 +17,7 @@ assert.ok(start > 0 && end > start, 'could not slice the usage helpers out of cl
 const api = new Function(`${source.slice(start, end)}
 return {
   priceFamily, estimateCost, formatTokens, formatCost, formatDuration,
-  currentSessionId, formatMoney, balanceText, createStore, PRICE_TABLE,
+  currentSessionId, formatMoney, balanceText, sumWallets, createStore, PRICE_TABLE,
 };`)();
 
 // Model → price family.
@@ -78,6 +78,23 @@ assert.strictEqual(api.balanceText([{ balance: '0', currency: 'CNY' }, { balance
 assert.strictEqual(api.balanceText([]), null);
 assert.strictEqual(api.balanceText(undefined), null);
 assert.strictEqual(api.balanceText([{}]), null);
+
+// The headline total adds the topped-up and the granted wallets per currency;
+// the source rows keep their server precision, the total is rounded to cents.
+assert.deepStrictEqual(api.sumWallets([{ balance: '10', currency: 'USD' }], [{ balance: '2.34', currency: 'USD' }]),
+  [{ currency: 'USD', balance: '12.34' }]);
+assert.deepStrictEqual(api.sumWallets([{ balance: '5', currency: 'CNY' }], undefined),
+  [{ currency: 'CNY', balance: '5' }]);
+assert.deepStrictEqual(api.sumWallets([], []), []);
+assert.deepStrictEqual(api.sumWallets([{ balance: '0', currency: 'CNY' }, { balance: '3.2', currency: 'CNY' }], []),
+  [{ currency: 'CNY', balance: '3.2' }]);
+assert.deepStrictEqual(
+  api.sumWallets([{ balance: '4', currency: 'USD' }], [{ balance: '1.5', currency: 'CNY' }, { balance: '2', currency: 'CNY' }]),
+  [{ currency: 'USD', balance: '4' }, { currency: 'CNY', balance: '3.5' }],
+  'currencies are summed independently');
+assert.strictEqual(api.balanceText(api.sumWallets([{ balance: '10', currency: 'USD' }], [{ balance: '2.34', currency: 'USD' }])),
+  '$12.34');
+assert.strictEqual(api.balanceText(api.sumWallets([], [])), null, 'no wallets means no headline');
 
 // The store publishes only real changes.
 const store = api.createStore(1);

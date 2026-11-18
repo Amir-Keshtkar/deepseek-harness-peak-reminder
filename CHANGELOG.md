@@ -3,6 +3,18 @@
 All notable changes to this DeepSeek Harness plugin. Versions are the
 `version` field in `package.json`.
 
+## 1.7.1 — 2026-11-18
+
+- Reverted the 1.7.0 balance change, which was pushed directly to `main` and did
+  not render the charged total.
+- The usage panel's balance band now headlines the account total: the topped-up
+  and granted wallets added per currency, with both parts named on the line
+  below. The amount is read once the account services are ready and again each
+  time the panel opens.
+- The band now always renders: a placeholder while the first read is in flight,
+  and the signed-out or unavailable message when the read cannot return credit,
+  so a refused account read is visible instead of silently absent.
+
 ## 1.6.0 — 2026-11-17
 
 - Right-to-left text reaches Markdown documents opened from the files panel,
