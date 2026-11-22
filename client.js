@@ -110,9 +110,6 @@ window.__ModuleLoader__.load({
         'usage.estimate': 'Estimated at current rates',
         'usage.tokps': '{n} tok/s',
         'balance.label': 'Balance',
-        'balance.total': 'Total balance',
-        'balance.toppedUp': 'Topped up',
-        'balance.granted': 'Granted',
         'balance.signedOut': 'Sign in to view',
         'balance.unavailable': 'Unavailable',
       },
@@ -158,9 +155,6 @@ window.__ModuleLoader__.load({
         'usage.estimate': '按当前价格估算',
         'usage.tokps': '{n} tok/s',
         'balance.label': '余额',
-        'balance.total': '总余额',
-        'balance.toppedUp': '充值',
-        'balance.granted': '赠送',
         'balance.signedOut': '登录后查看',
         'balance.unavailable': '不可用',
       },
@@ -856,10 +850,10 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * The account balance, kept in its own tinted band so it never reads as a
-     * session metric. The headline is the charged total (topped-up plus granted
-     * wallets) and the line below names both parts. The band always renders, so
-     * a slow or refused account read is visible instead of silently absent.
+     * The account balance on one line, kept in its own tinted band so it never
+     * reads as a session metric. The figure is the credit left: the topped-up
+     * and the granted wallets added together. The band always renders, so a
+     * slow or refused account read is visible instead of silently absent.
      * @param {{t: Function, balance: object | undefined}} props - copy and the balance snapshot.
      * @returns {React.ReactElement} the band.
      */
@@ -869,15 +863,8 @@ window.__ModuleLoader__.load({
       const ready = !unread && balance.status === 'ready';
 
       let main;
-      let extra = null;
       if (ready) {
         main = balanceText(sumWallets(balance.value, balance.bonusWallets)) ?? formatMoney('0', 'USD');
-        const toppedUp = balanceText(balance.value);
-        const granted = balanceText(balance.bonusWallets);
-        const parts = [];
-        if (toppedUp !== null) parts.push(`${t('balance.toppedUp')} ${toppedUp}`);
-        if (granted !== null) parts.push(`${t('balance.granted')} ${granted}`);
-        if (parts.length > 0) extra = parts.join(' · ');
       } else if (unread) {
         main = '…';
       } else if (balance.status === 'signedOut') {
@@ -899,24 +886,24 @@ window.__ModuleLoader__.load({
           }),
           h('circle', { cx: 11, cy: 8.5, r: 1.1, fill: 'currentColor' }),
           ),
-          t(ready ? 'balance.total' : 'balance.label'),
+          t('balance.label'),
         ),
         h('span', {
           className: ready ? 'peakr-balance-value' : 'peakr-balance-value is-muted',
         }, main),
-        extra === null ? null : h('span', { className: 'peakr-balance-extra' }, extra),
       );
     }
 
     /**
      * The sidebar usage button and its breakdown panel.
-     * @param {{t: Function, wide: boolean, useSessions: Function}} props - copy and the session hook.
+     * @param {object} props - standard slot props plus the injected balance hook.
      * @returns {React.ReactElement | null} the entry, or nothing without the session source.
      */
     function UsageEntry(props) {
-      const { t, wide, useSessions } = props;
-      if (typeof useSessions !== 'function') return null;
-      return h(UsageButton, { t, wide, useSessions });
+      if (typeof props.useSessions !== 'function') return null;
+      // Every injected prop — the balance hook and its refresh beside the
+      // standard ones — reaches the button, which owns the panel and the band.
+      return h(UsageButton, props);
     }
 
     /**
@@ -1371,6 +1358,30 @@ window.__ModuleLoader__.load({
   direction: ltr;
   text-align: left;
 }
+/* The approval prompt raised before a guarded call asks its question in the
+   same reading direction: the reason, description, and subject are prose, so
+   the card and its buttons mirror. Its scrolling body is pinned left to right
+   so the vertical scrollbar stays on the right, and the tool detail under the
+   question is a command, so it keeps its own left-to-right order. */
+[data-approval-key] {
+  direction: rtl;
+}
+[data-approval-key] [data-approval-scroll] {
+  direction: ltr;
+}
+[data-approval-key] [class*="_heading"],
+[data-approval-key] [class*="_headline"],
+[data-approval-key] [class*="_description"],
+[data-approval-key] [class*="_subject"] {
+  direction: rtl;
+  text-align: start;
+}
+[data-approval-key] [class*="_command"],
+[data-approval-key] pre,
+[data-approval-key] code {
+  direction: ltr;
+  text-align: left;
+}
 `;
 
     const CSS = `
@@ -1579,10 +1590,6 @@ window.__ModuleLoader__.load({
 .peakr-balance-value.is-muted {
   font-size: 11px; font-weight: 400; color: var(--dsw-alias-label-tertiary);
 }
-.peakr-balance-extra {
-  grid-column: 1 / -1; color: var(--dsw-alias-label-tertiary);
-  font-size: 11px; line-height: 15px;
-}
 
 .peakr-toast {
   position: fixed; z-index: 130; left: 50%; pointer-events: auto; cursor: pointer;
@@ -1665,22 +1672,24 @@ window.__ModuleLoader__.load({
         const balanceStore = createStore(undefined);
         let refreshBalance = () => {};
 
-        ctx.inject(['accountUi', 'remote'], scope => {
+        ctx.inject(['accountUi', 'remote', 'remote.account'], scope => {
           let lastRead = 0;
           let inflight = null;
           const read = async () => {
             try {
               const account = scope.accountUi.getSnapshot();
-              if (account === undefined || account.view === undefined) {
-                // The account stream has not published yet; keep the band in
-                // its loading state instead of claiming the user is signed out.
-                balanceStore.set(undefined);
+              if (account.view === undefined) {
+                // The account stream has not published yet, or it was lost:
+                // keep the band in its loading state instead of claiming the
+                // user is signed out, but name a lost stream as unavailable.
+                balanceStore.set(account.failed === true ? { status: 'failed' } : { status: 'loading' });
                 return;
               }
               if (account.view.status !== 'credential-stored') {
                 balanceStore.set({ status: 'signedOut' });
                 return;
               }
+              balanceStore.set({ status: 'loading' });
               const metadata = scope.accountUi.clientMetadata(scope.locale.getSnapshot().active);
               const result = await scope.remote.account.getBalance(metadata);
               if (result?.ok !== true) {
@@ -1697,11 +1706,13 @@ window.__ModuleLoader__.load({
             const current = balanceStore.getSnapshot();
             // An unread, failed, or signed-out snapshot is worth retrying; a
             // ready one is cached for a minute unless the panel asks for a
-            // fresh read. The short floor also absorbs double-open events.
-            const retry = current === undefined || current?.status === 'failed' || current?.status === 'signedOut';
+            // fresh read. The millisecond floor absorbs a burst of events —
+            // the panel opening calls for a read while the account stream may
+            // publish at the same moment — without swallowing a real change.
+            const retry = current === undefined || current.status === 'failed' || current.status === 'signedOut';
             const now = Date.now();
             if (force !== true && !retry && now - lastRead < 60000) return;
-            if (now - lastRead < 3000) return;
+            if (now - lastRead < (force === true ? 250 : 3000)) return;
             lastRead = now;
             inflight = read().finally(() => { inflight = null; });
           };

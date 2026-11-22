@@ -22,9 +22,9 @@ Click it for a card with the countdown to the next change, a 24-hour ribbon of t
 
 **Notifications.** A desktop notification arrives when a reply finishes or when the agent asks a question, so you can work elsewhere while DeepSeek runs. The window is left alone while it has focus, where the conversation already shows the result.
 
-**Usage.** A compact cell sits in the sidebar foot, directly above the account row, showing this session's token total and estimated cost. Click it for the input, cached, and output buckets, decode speed, turn count with total model time, the model when the session reports one, and the basis of the estimate. Below them, in its own tinted band so it never reads as a session metric, is the account balance: the total as the headline, with the topped-up and the granted wallets on the line under it. It is read from the account service once the account is ready and again each time the panel opens. Cost comes from DeepSeek's published per-million rates, doubled inside a peak window; it is an estimate, not a bill.
+**Usage.** A compact cell sits in the sidebar foot, directly above the account row, showing this session's token total and estimated cost. Click it for the input, cached, and output buckets, decode speed, turn count with total model time, the model when the session reports one, and the basis of the estimate. Below them, in its own tinted band so it never reads as a session metric, is the account balance: one figure, the credit left. It is read from the account service once the account is ready and again each time the panel opens. Cost comes from DeepSeek's published per-million rates, doubled inside a peak window; it is an estimate, not a bill.
 
-**Right-to-left text.** Answers, the questions you write, the session-list titles, the agent's multi-choice questions with their options, and Markdown files opened from the files panel all read right to left. Code blocks, YAML frontmatter, and formulas stay left to right. All three switches live in the card and are remembered per browser.
+**Right-to-left text.** Answers, the questions you write, the session-list titles, the agent's multi-choice questions with their options, the approval prompt it raises before a guarded call, and Markdown files opened from the files panel all read right to left. Code blocks, YAML frontmatter, and formulas stay left to right — including the command detail under an approval. All three switches live in the card and are remembered per browser.
 
 ## Install
 
@@ -96,6 +96,7 @@ node --check scripts/sync-schedule.mjs
 
 TZ=Asia/Tehran node tests/time-model.test.cjs   # 16 boundary cases, ribbon, hover points
 TZ=Asia/Tehran node tests/locales.test.cjs      # dictionary parity, manifest, input validation
+node tests/rtl.test.cjs                         # which surfaces mirror, which stay left to right
 node tests/usage.test.cjs                       # price table, cost estimate, formatters
 node scripts/sync-schedule.mjs --check          # the repo matches the official page
 ```
@@ -117,7 +118,7 @@ Yes, on its own. The schedule is parsed from the official pricing page and publi
 The same dot covers both directions: it counts down to the off-peak window opening as well, and a toast marks the moment a peak begins, so a long job can be started after the switch instead of before it.
 
 **Does it work with Persian and RTL text?**
-Yes. One switch in the card turns answers, your own messages, session titles, and the agent's multi-choice questions and options right to left, while code blocks and formulas stay left to right. The plugin's own labels follow the app language — English by default, Chinese when the app runs in Chinese.
+Yes. One switch in the card turns answers, your own messages, session titles, the agent's multi-choice questions and options, and its allow-once/reject approval prompt right to left, while code blocks, formulas, and the command detail inside an approval stay left to right. The plugin's own labels follow the app language — English by default, Chinese when the app runs in Chinese.
 
 **Why is the cost an estimate?**
 DSH reports tokens, not money. The plugin multiplies the tokens of the current session by DeepSeek's published per-million rates, doubling them inside a peak window. A session that spans a peak boundary is priced at the rate in force when the panel is opened, so treat the figure as a size, not a bill — the account's real remaining balance is shown below it.
@@ -135,7 +136,7 @@ No. It reads token counters the app already publishes and renders text it was gi
 - The RTL selectors match attribute hooks and CSS-module local names; a rename upstream would narrow them, not break rendering.
 - The usage cost is an estimate at the rate in force when the panel is read: a session that spans a peak boundary is not split between the two rates. The price table is shipped with the plugin.
 - The usage cell is hidden while the sidebar is collapsed, because the whole sidebar foot is hidden on this desktop build.
-- The balance band needs a signed-in account and a permitted account read; otherwise it says so instead of guessing. The total is the credit left in the account: the Platform reports the topped-up and granted wallets separately, and not a lifetime sum of top-ups.
+- The balance band needs a signed-in account and a permitted account read; otherwise it says so instead of guessing. It shows the credit left — the topped-up and granted wallets added together — not a lifetime sum of top-ups.
 - Chinese holiday dates are a maintained list, as noted above.
 
 ## Layout

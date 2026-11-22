@@ -109,5 +109,24 @@ off();
 store.set(3);
 assert.strictEqual(notifications, 1, 'unsubscribed listeners must not fire');
 
+// The footer entry hands the injected balance hook and its refresh down to the
+// button that renders the band. Dropping them left the band on its placeholder
+// forever, because the button saw no balance source at all.
+const entryStart = source.indexOf('function UsageEntry');
+const entryEnd = source.indexOf('function UsageButton');
+assert.ok(entryStart > 0 && entryEnd > entryStart, 'could not slice UsageEntry out of client.js');
+const element = (type, props) => ({ type, props });
+const Button = function UsageButton() {};
+const UsageEntry = new Function('h', 'UsageButton', `${source.slice(entryStart, entryEnd)}\nreturn UsageEntry;`)(element, Button);
+const useBalance = value => value;
+const refreshBalance = () => {};
+const entry = UsageEntry({ t: key => key, wide: true, useSessions: () => undefined, useBalance, refreshBalance });
+assert.notStrictEqual(entry, null, 'a sidebar with a session source renders the entry');
+assert.strictEqual(entry.type, Button, 'the entry renders the usage button');
+assert.strictEqual(entry.props.useBalance, useBalance, 'the balance hook reaches the button');
+assert.strictEqual(entry.props.refreshBalance, refreshBalance, 'the refresh reaches the button');
+assert.strictEqual(entry.props.t('usage.label'), 'usage.label', 'copy still reaches the button');
+assert.strictEqual(UsageEntry({ t: key => key, wide: true }), null, 'no session source means no entry');
+
 console.log('usage helpers: all assertions passed');
 console.log('price table:', JSON.stringify(api.PRICE_TABLE.flash.off));

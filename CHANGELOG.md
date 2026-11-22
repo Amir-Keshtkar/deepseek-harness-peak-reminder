@@ -3,6 +3,24 @@
 All notable changes to this DeepSeek Harness plugin. Versions are the
 `version` field in `package.json`.
 
+## 1.8.0 — 2026-11-22
+
+- Fixed the usage panel's balance band, which never left its loading placeholder
+  in the running app. The sidebar entry now hands the injected balance snapshot
+  and refresh to the button that renders the panel, the account Remote namespace
+  is injected before the read, and a lost account stream shows the unavailable
+  state instead of loading forever.
+- The balance band is one line: a "Balance" label and the credit left, with the
+  topped-up and granted wallets added together. The per-wallet breakdown is gone.
+- Right-to-left reaches the approval prompt the agent raises before a guarded
+  call: the reason, description, subject, status strip, and buttons mirror, so a
+  Persian question reads right to left instead of staying in a left-to-right
+  card. The tool detail under the question stays left to right, as do code and
+  formulas.
+- `tests/rtl.test.cjs` pins the promise: every prose surface keeps its RTL
+  selector, and every code surface keeps its LTR override. `tests/usage.test.cjs`
+  pins the balance plumbing: the hook and the refresh reach the panel.
+
 ## 1.7.1 — 2026-11-18
 
 - Reverted the 1.7.0 balance change, which was pushed directly to `main` and did
