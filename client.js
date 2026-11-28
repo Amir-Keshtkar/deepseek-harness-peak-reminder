@@ -53,6 +53,14 @@ window.__ModuleLoader__.load({
     const CARD_WIDTH = 272;
     const CARD_GAP = 8;
     const RIBBON_STEPS = 96;
+    /**
+     * How far the fallback dot's right edge sits from the header's own edge.
+     * The Session header's dot is pushed in by the trailing padding (28), the
+     * More button (28), their gap (8), and the corner seat (20); the fallback
+     * uses the same inset so it lands in the seat the real dot occupies instead
+     * of hugging the window edge.
+     */
+    const FLOATING_SEAT_INSET = 84;
 
     /**
      * The published manifest. A packed or GitHub install cannot rewrite its own
@@ -112,6 +120,10 @@ window.__ModuleLoader__.load({
         'balance.label': 'Balance',
         'balance.signedOut': 'Sign in to view',
         'balance.unavailable': 'Unavailable',
+        'spend.label': 'Spent',
+        'spend.reset': 'Reset',
+        'spend.reset.aria': 'Reset the total spent counter',
+        'usage.ring.aria': '{percent}% of credit used',
       },
       zh: {
         'status.peak': '高峰时段',
@@ -157,6 +169,10 @@ window.__ModuleLoader__.load({
         'balance.label': '余额',
         'balance.signedOut': '登录后查看',
         'balance.unavailable': '不可用',
+        'spend.label': '已消费',
+        'spend.reset': '重置',
+        'spend.reset.aria': '重置累计消费',
+        'usage.ring.aria': '已用额度 {percent}%',
       },
     };
 
@@ -290,6 +306,21 @@ window.__ModuleLoader__.load({
         target,
         remaining,
       };
+    }
+
+    /**
+     * The next instant the status display has to repaint: either a peak/off
+     * transition, or the moment the amber lead-in begins. A clock that wakes
+     * only here never shows the old colour after the boundary, which a coarse
+     * poll can — and a background window's throttled timers make worse.
+     * @param {number} ms - epoch milliseconds.
+     * @returns {number} the wake instant, always in the future.
+     */
+    function nextStatusWake(ms) {
+      const state = readState(ms);
+      const leadStart = state.target - LEAD_MINUTES * 60000;
+      const wake = state.mode === 'off' ? Math.max(ms + 1000, leadStart) : state.target;
+      return Math.max(ms + 1000, wake + 250);
     }
 
     /**
@@ -521,6 +552,46 @@ window.__ModuleLoader__.load({
         const timer = setInterval(() => { setNow(Date.now()); }, intervalMs);
         return () => { clearInterval(timer); };
       }, [intervalMs]);
+      return now;
+    }
+
+    /**
+     * Keep the peak status live without polling for it. The timer is armed for
+     * the next instant the colour can change — the boundary, or the start of
+     * the amber lead-in — and re-armed after every wake. A window that comes
+     * back from the background, a restored page, or a clock that slept across
+     * the boundary all repaint at once instead of waiting out a poll period.
+     * @returns {number} the current epoch milliseconds.
+     */
+    function useStatusNow() {
+      const [now, setNow] = React.useState(() => Date.now());
+      React.useEffect(() => {
+        let timer = null;
+
+        const arm = () => {
+          if (timer !== null) clearTimeout(timer);
+          const at = Date.now();
+          setNow(at);
+          // The cap keeps a long off-peak stretch from holding one huge timer,
+          // so a throttled or suspended page still wakes periodically.
+          const delay = Math.max(500, Math.min(STATUS_TICK_MS * 3, nextStatusWake(at) - at));
+          timer = setTimeout(arm, delay);
+        };
+
+        arm();
+        const refresh = () => {
+          if (typeof document === 'undefined' || document.visibilityState === 'visible') arm();
+        };
+        document.addEventListener('visibilitychange', refresh);
+        window.addEventListener('focus', refresh);
+        window.addEventListener('pageshow', refresh);
+        return () => {
+          if (timer !== null) clearTimeout(timer);
+          document.removeEventListener('visibilitychange', refresh);
+          window.removeEventListener('focus', refresh);
+          window.removeEventListener('pageshow', refresh);
+        };
+      }, []);
       return now;
     }
 
@@ -831,6 +902,293 @@ window.__ModuleLoader__.load({
       }));
     }
 
+    /* --------------------------------------------------------------------- *
+     * Lifetime spend — the API-key reader has no balance to show, so the
+     * panel counts what every Session has cost so far instead.
+     * --------------------------------------------------------------------- */
+
+    /** Where the accumulated spend book and the credit high-water marks live. */
+    const SPEND_KEY = 'dsh.peak-reminder.spent';
+    const CREDIT_KEY = 'dsh.peak-reminder.credit';
+    /** Streaming writes one cost tick at a time; the file is written lazily. */
+    const SPEND_SAVE_MS = 1500;
+
+    /** Round a cost to micro-dollars so float dust never reads as a change. */
+    function roundCost(value) {
+      return Math.round((Number(value) || 0) * 1e6) / 1e6;
+    }
+
+    /**
+     * Read one JSON value from storage. Private mode, a full quota, or a
+     * server-side render all yield null instead of throwing.
+     * @param {string} key - storage key.
+     * @returns {unknown} the parsed value, or null.
+     */
+    function readStored(key) {
+      try {
+        if (typeof localStorage === 'undefined') return null;
+        const raw = localStorage.getItem(key);
+        return raw === null ? null : JSON.parse(raw);
+      } catch {
+        return null;
+      }
+    }
+
+    /**
+     * Write one JSON value to storage, best-effort.
+     * @param {string} key - storage key.
+     * @param {unknown} value - the value to serialize.
+     * @returns {void}
+     */
+    function writeStored(key, value) {
+      try {
+        if (typeof localStorage === 'undefined') return;
+        localStorage.setItem(key, JSON.stringify(value));
+      } catch {
+        // The in-memory value still applies to this page.
+      }
+    }
+
+    /**
+     * Load the spend book: one `{ base, seen }` row per Session, keyed by id.
+     * `seen` is the highest cost ever observed for that Session, `base` the
+     * cost it had when the reader last reset the counter; their difference is
+     * what the Session has spent since then. Rows outlive the Session, so
+     * deleting a chat never lowers the lifetime figure.
+     * @returns {{sessions: Record<string, {base: number, seen: number}>}} the book.
+     */
+    function readSpendBook() {
+      const sessions = {};
+      const saved = readStored(SPEND_KEY);
+      if (saved !== null && typeof saved === 'object' && saved.sessions !== null
+        && typeof saved.sessions === 'object') {
+        for (const [id, row] of Object.entries(saved.sessions)) {
+          if (row === null || typeof row !== 'object') continue;
+          const base = Number(row.base);
+          const seen = Number(row.seen);
+          if (!Number.isFinite(base) || !Number.isFinite(seen)) continue;
+          sessions[id] = {
+            base: Math.max(0, roundCost(base)),
+            seen: Math.max(0, roundCost(seen)),
+          };
+        }
+      }
+      return { sessions };
+    }
+
+    /**
+     * Sum the book into the figure the panel shows.
+     * @param {{sessions: Record<string, {base: number, seen: number}>}} book - the spend book.
+     * @returns {number} US dollars spent since the last reset.
+     */
+    function spendTotal(book) {
+      let total = 0;
+      for (const row of Object.values(book.sessions)) total += Math.max(0, row.seen - row.base);
+      return roundCost(total);
+    }
+
+    /**
+     * Fold one snapshot of Session costs into the book. Costs only ever rise
+     * for a live Session, but a re-read can come back lower after a compaction;
+     * the high-water `seen` keeps the counter monotone.
+     * @param {{sessions: Record<string, {base: number, seen: number}>}} book - the current book.
+     * @param {Record<string, number>} costs - this snapshot's cost per Session id.
+     * @returns {{book: object, changed: boolean}} the merged book and whether it moved.
+     */
+    function mergeSpend(book, costs) {
+      const sessions = { ...book.sessions };
+      let changed = false;
+      for (const [id, raw] of Object.entries(costs)) {
+        const cost = Math.max(0, roundCost(raw));
+        const before = sessions[id];
+        if (before === undefined) {
+          if (cost <= 0) continue;
+          sessions[id] = { base: 0, seen: cost };
+          changed = true;
+          continue;
+        }
+        if (cost > before.seen) {
+          sessions[id] = { base: before.base, seen: cost };
+          changed = true;
+        }
+      }
+      return { book: changed ? { sessions } : book, changed };
+    }
+
+    /**
+     * Start the counter again at zero without losing the Sessions it knows:
+     * every known row's baseline becomes its current cost, and the live
+     * snapshot seeds any Session the book has not met yet.
+     * @param {{sessions: Record<string, {base: number, seen: number}>}} book - the current book.
+     * @param {Record<string, number>} costs - this snapshot's cost per Session id.
+     * @returns {{sessions: object}} a book whose total is zero.
+     */
+    function resetSpend(book, costs) {
+      const sessions = {};
+      for (const [id, row] of Object.entries(book.sessions)) sessions[id] = { base: row.seen, seen: row.seen };
+      for (const [id, raw] of Object.entries(costs)) {
+        const cost = Math.max(0, roundCost(raw));
+        const row = sessions[id];
+        if (row === undefined) {
+          if (cost > 0) sessions[id] = { base: cost, seen: cost };
+        } else if (cost > row.seen) {
+          row.seen = cost;
+          row.base = cost;
+        }
+      }
+      return { sessions };
+    }
+
+    /**
+     * Charge every Session's token buckets at the rate in force. A Session the
+     * list has not loaded yet simply has no projection and is skipped; the
+     * high-water book adds it when its row arrives.
+     * @param {object} state - the Session list snapshot.
+     * @param {boolean} peak - whether peak rates apply.
+     * @returns {Record<string, number>} one cost per Session id.
+     */
+    function sessionSpendCosts(state, peak) {
+      const costs = {};
+      const projections = state === undefined || state === null ? undefined : state.projectionsBySession;
+      if (projections === undefined || projections === null) return costs;
+      for (const [id, projection] of Object.entries(projections)) {
+        const usage = projection === null || projection === undefined
+          ? undefined
+          : projection.values?.tokenUsage;
+        if (usage === undefined || usage === null) continue;
+        const cost = estimateCost(usage, state.byId?.[id]?.model, peak);
+        if (cost > 0) costs[id] = cost;
+      }
+      return costs;
+    }
+
+    /** The spend book for this page, and the figure the band subscribes to. */
+    let spendBook = readSpendBook();
+    const spendTotalStore = createStore(spendTotal(spendBook));
+    let spendSaveTimer = null;
+
+    /**
+     * Persist the book, batched so a streaming reply does not write on every tick.
+     * @param {boolean} immediate - write now instead of after the batch window.
+     * @returns {void}
+     */
+    function saveSpendBook(immediate) {
+      if (immediate) {
+        if (spendSaveTimer !== null) {
+          clearTimeout(spendSaveTimer);
+          spendSaveTimer = null;
+        }
+        writeStored(SPEND_KEY, spendBook);
+        return;
+      }
+      if (spendSaveTimer !== null) return;
+      spendSaveTimer = setTimeout(() => {
+        spendSaveTimer = null;
+        writeStored(SPEND_KEY, spendBook);
+      }, SPEND_SAVE_MS);
+    }
+
+    /**
+     * Fold a snapshot's costs into the book and publish the new total.
+     * @param {Record<string, number>} costs - cost per Session id.
+     * @returns {void}
+     */
+    function recordSpend(costs) {
+      const merged = mergeSpend(spendBook, costs);
+      if (!merged.changed) return;
+      spendBook = merged.book;
+      spendTotalStore.set(spendTotal(spendBook));
+      saveSpendBook(false);
+    }
+
+    /**
+     * Zero the lifetime counter at the costs in force right now.
+     * @param {Record<string, number>} costs - cost per Session id.
+     * @returns {void}
+     */
+    function restartSpend(costs) {
+      spendBook = resetSpend(spendBook, costs);
+      spendTotalStore.set(0);
+      saveSpendBook(true);
+    }
+
+    /**
+     * Load the credit baseline per currency: the amount in force after the most
+     * recent top-up (`base`) and the last amount read (`last`), which is how a
+     * rise is recognised as a top-up rather than ordinary spending. The 1.9.0
+     * shape stored a single high-water number with different semantics, so it
+     * is discarded: the next successful read starts a fresh baseline instead of
+     * inheriting a ceiling that may never have been a top-up.
+     * @returns {Record<string, {base: number, last: number}>} credit per currency.
+     */
+    function readCreditMarks() {
+      const marks = {};
+      const saved = readStored(CREDIT_KEY);
+      if (saved === null || typeof saved !== 'object') return marks;
+      for (const [currency, row] of Object.entries(saved)) {
+        if (row === null || typeof row !== 'object') continue;
+        const base = Number(row.base);
+        const last = Number(row.last);
+        if (!Number.isFinite(base) || !Number.isFinite(last)) continue;
+        marks[currency] = { base: Math.max(0, base), last: Math.max(0, last) };
+      }
+      return marks;
+    }
+
+    /** Credit baselines for this page. */
+    let creditMarks = readCreditMarks();
+
+    /**
+     * The share of the last top-up's credit already spent.
+     *
+     * The baseline is the balance present after the most recent top-up, not the
+     * highest number ever seen: a rise re-baselines even when the new amount is
+     * still below an older peak (spend $20 down to $5, top up to $8, the ring is
+     * empty at $8 rather than three-quarters full). A fall is spending against
+     * the baseline already in force.
+     * @param {{currency: string, balance: string}[]} credit - current credit per currency.
+     * @param {Record<string, {base: number, last: number}>} marks - the stored baselines.
+     * @returns {{share: number, marks: Record<string, {base: number, last: number}>, changed: boolean}} ratio and baselines.
+     */
+    function creditShare(credit, marks) {
+      const next = { ...marks };
+      let total = 0;
+      let used = 0;
+      let changed = false;
+      for (const wallet of credit) {
+        const currency = wallet.currency === 'CNY' ? 'CNY' : 'USD';
+        const value = Math.max(0, Number(wallet.balance) || 0);
+        const before = next[currency] ?? { base: value, last: value };
+        let base = before.base;
+        let last = before.last;
+        if (next[currency] === undefined) changed = true;
+        // A rise is a top-up: compare against the new amount from now on.
+        if (value > last + 1e-6) base = value;
+        if (Math.abs(value - last) > 1e-9) {
+          last = value;
+          changed = true;
+        }
+        next[currency] = { base, last };
+        total += base;
+        used += Math.max(0, base - value);
+      }
+      return { share: total > 0 ? Math.min(1, used / total) : 0, marks: next, changed };
+    }
+
+    /**
+     * Record the credit seen, then return the share of the last top-up spent.
+     * @param {{currency: string, balance: string}[]} credit - current credit per currency.
+     * @returns {number} fraction between 0 and 1.
+     */
+    function observeCredit(credit) {
+      const result = creditShare(credit, creditMarks);
+      if (result.changed) {
+        creditMarks = result.marks;
+        writeStored(CREDIT_KEY, creditMarks);
+      }
+      return result.share;
+    }
+
     /**
      * One labelled row in the usage panel.
      * @param {{label: string, value: string, hint?: string}} props - row content.
@@ -850,22 +1208,72 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * The usage glyph: a ring that fills with the share of credit spent, so the
+     * icon itself carries the reading instead of only the number beside it.
+     * Without a credit figure the ring draws its empty track, which is the
+     * honest state for an API-key reader.
+     * @param {{share: number | null, label?: string}} props - fraction spent and its copy.
+     * @returns {React.ReactElement} the ring.
+     */
+    function UsageRing(props) {
+      const { share, label } = props;
+      const radius = 8;
+      const circumference = 2 * Math.PI * radius;
+      const filled = typeof share === 'number' && Number.isFinite(share)
+        ? Math.min(1, Math.max(0, share))
+        : 0;
+      const color = filled >= 0.9
+        ? 'var(--dsw-alias-state-error-primary)'
+        : filled >= 0.65
+          ? 'var(--dsw-alias-state-warn-primary)'
+          : 'var(--dsw-alias-state-business-primary)';
+      return h('svg', {
+        width: 20, height: 20, viewBox: '0 0 20 20',
+        'aria-hidden': label === undefined ? 'true' : undefined,
+        role: label === undefined ? undefined : 'img',
+        'aria-label': label,
+        className: 'peakr-usage-ring',
+      },
+      h('circle', {
+        cx: 10, cy: 10, r: radius, fill: 'none', stroke: 'currentColor', strokeWidth: 2, opacity: 0.22,
+      }),
+      filled <= 0 ? null : h('circle', {
+        cx: 10, cy: 10, r: radius, fill: 'none', stroke: color, strokeWidth: 2,
+        strokeLinecap: 'round',
+        strokeDasharray: circumference,
+        strokeDashoffset: circumference * (1 - filled),
+        transform: 'rotate(-90 10 10)',
+      }),
+      );
+    }
+
+    /**
      * The account balance on one line, kept in its own tinted band so it never
      * reads as a session metric. The figure is the credit left: the topped-up
      * and the granted wallets added together. The band always renders, so a
      * slow or refused account read is visible instead of silently absent.
-     * @param {{t: Function, balance: object | undefined}} props - copy and the balance snapshot.
+     *
+     * When the credit cannot be read — an API-key reader, a signed-out page, a
+     * refused account call — the band adds what this browser has spent across
+     * every Session, with a reset for the moment the reader tops the account up.
+     * @param {{t: Function, balance: object | undefined, spent: number, onResetSpent: Function}} props
+     *   copy, the balance snapshot, the lifetime total, and its reset.
      * @returns {React.ReactElement} the band.
      */
     function BalanceBand(props) {
-      const { t, balance } = props;
+      const { t, balance, spent, onResetSpent } = props;
       const unread = balance === undefined || balance === null;
-      const ready = !unread && balance.status === 'ready';
+      // A read in flight is its own state: showing the previous figure (or
+      // "Unavailable") while the account call runs is the flicker this band
+      // used to produce on every panel opening.
+      const loading = unread || balance.status === 'loading';
+      const ready = !loading && balance.status === 'ready';
+      const settledUnavailable = !loading && !ready;
 
       let main;
       if (ready) {
         main = balanceText(sumWallets(balance.value, balance.bonusWallets)) ?? formatMoney('0', 'USD');
-      } else if (unread) {
+      } else if (loading) {
         main = '…';
       } else if (balance.status === 'signedOut') {
         main = t('balance.signedOut');
@@ -875,7 +1283,7 @@ window.__ModuleLoader__.load({
 
       return h('div', {
         className: 'peakr-balance',
-        'data-peakr-balance': unread ? 'loading' : balance.status,
+        'data-peakr-balance': loading ? 'loading' : balance.status,
       },
         h('span', { className: 'peakr-balance-key' },
           h('svg', {
@@ -887,10 +1295,36 @@ window.__ModuleLoader__.load({
           h('circle', { cx: 11, cy: 8.5, r: 1.1, fill: 'currentColor' }),
           ),
           t('balance.label'),
+          loading ? h('span', { className: 'peakr-balance-spinner', 'aria-hidden': 'true' }) : null,
         ),
         h('span', {
-          className: ready ? 'peakr-balance-value' : 'peakr-balance-value is-muted',
+          className: ready
+            ? 'peakr-balance-value'
+            : loading ? 'peakr-balance-value is-loading' : 'peakr-balance-value is-muted',
         }, main),
+        // The lifetime figure is a measurement, so it appears only once the
+        // credit read has actually failed; while the call is in flight the
+        // spinner says what is happening instead of flashing a number that is
+        // about to be replaced.
+        settledUnavailable ? h('span', { className: 'peakr-balance-key peakr-spent-key' }, t('spend.label')) : null,
+        settledUnavailable ? h('span', { className: 'peakr-spent-value' },
+          h('span', { className: 'peakr-spent-num' }, formatCost(Number(spent) || 0)),
+          h('button', {
+            type: 'button',
+            className: 'peakr-spent-reset',
+            title: t('spend.reset.aria'),
+            'aria-label': t('spend.reset.aria'),
+            onClick: () => { if (typeof onResetSpent === 'function') onResetSpent(); },
+          },
+          h('svg', {
+            width: 11, height: 11, viewBox: '0 0 16 16', 'aria-hidden': 'true',
+            fill: 'none', stroke: 'currentColor', strokeWidth: 1.5, strokeLinecap: 'round',
+          },
+          h('path', { d: 'M13 8a5 5 0 1 1-1.6-3.7' }),
+          h('path', { d: 'M13 2.6V6.4H9.2' }),
+          ),
+          ),
+        ) : null,
       );
     }
 
@@ -924,6 +1358,8 @@ window.__ModuleLoader__.load({
         ? undefined
         : state?.byId?.[sessionId]?.model));
       const balance = useBalance(value => value);
+      const sessions = useSessions(state => state);
+      const spent = React.useSyncExternalStore(spendTotalStore.subscribe, spendTotalStore.getSnapshot);
       const now = useNow(60000);
       const peak = isPeakAt(now);
 
@@ -935,6 +1371,36 @@ window.__ModuleLoader__.load({
       const speed = Number(stats.decodeMs) > 0
         ? Math.round((Number(stats.decodeTokens) || 0) / (Number(stats.decodeMs) / 1000))
         : undefined;
+
+      // The ring's ceiling is the highest credit this browser has seen: a
+      // top-up raises it, and regular use fills the ring towards empty.
+      const [share, setShare] = React.useState(null);
+      React.useEffect(() => {
+        // An in-flight re-read keeps the last ratio instead of blanking the
+        // ring each time the panel asks for fresh credit.
+        if (balance === undefined || balance === null) return;
+        if (balance.status !== 'ready') {
+          setShare(null);
+          return;
+        }
+        setShare(observeCredit(sumWallets(balance.value, balance.bonusWallets)));
+      }, [balance]);
+
+      // Keep the lifetime book current while any Session reports usage. The
+      // book is monotone and persisted, so a deleted chat and a collapsed
+      // sidebar do not lose spend already counted.
+      React.useEffect(() => {
+        if (sessions === undefined || sessions === null) return;
+        recordSpend(sessionSpendCosts(sessions, isPeakAt(Date.now())));
+      }, [sessions]);
+
+      const resetSpent = React.useCallback(() => {
+        if (sessions === undefined || sessions === null) {
+          restartSpend({});
+          return;
+        }
+        restartSpend(sessionSpendCosts(sessions, isPeakAt(Date.now())));
+      }, [sessions]);
 
       const [position, setPosition] = React.useState(null);
       const triggerRef = React.useRef(null);
@@ -977,6 +1443,7 @@ window.__ModuleLoader__.load({
       }, [open]);
 
       const summary = total === 0 ? '—' : `${formatTokens(total)} · ${formatCost(cost)}`;
+      const shown = total === 0 ? '—' : formatCost(cost);
       const panel = open ? mountFloating(h('div', {
         ref: panelRef,
         className: 'peakr-card peakr-usage-card',
@@ -998,7 +1465,7 @@ window.__ModuleLoader__.load({
         h(UsageRow, { label: t('usage.cost'), value: formatCost(cost) }),
       ),
       h('div', { className: 'peakr-usage-note' }, t('usage.estimate')),
-      h(BalanceBand, { t, balance }),
+      h(BalanceBand, { t, balance, spent, onResetSpent: resetSpent }),
       )) : null;
 
       return h('div', { className: 'peakr-usage-root' },
@@ -1009,16 +1476,15 @@ window.__ModuleLoader__.load({
           className: 'peakr-usage',
           'data-wide': wide,
           'aria-expanded': open,
-          title: total === 0 ? t('usage.empty') : summary,
+          title: total === 0 ? t('usage.empty') : `${summary} · ${t('usage.session')}`,
           onClick: () => { if (open) setPosition(null); else place(); },
         },
-        h('svg', { width: 14, height: 14, viewBox: '0 0 16 16', 'aria-hidden': 'true', className: 'peakr-usage-icon' },
-          h('rect', { x: 2, y: 9, width: 3, height: 5, rx: 1, fill: 'currentColor', opacity: 0.5 }),
-          h('rect', { x: 6.5, y: 5, width: 3, height: 9, rx: 1, fill: 'currentColor', opacity: 0.72 }),
-          h('rect', { x: 11, y: 2, width: 3, height: 12, rx: 1, fill: 'currentColor' }),
-        ),
+        h(UsageRing, {
+          share,
+          label: typeof share === 'number' ? t('usage.ring.aria', { percent: Math.round(share * 100) }) : undefined,
+        }),
         wide ? h('span', { className: 'peakr-usage-name' }, t('usage.label')) : null,
-        h('span', { className: 'peakr-usage-value' }, summary),
+        wide ? h('span', { className: 'peakr-usage-value' }, shown) : null,
         ),
         panel,
       );
@@ -1179,14 +1645,99 @@ window.__ModuleLoader__.load({
       ));
     }
 
+    /* --------------------------------------------------------------------- *
+     * The header seat — the Session header renders the utilities slot only
+     * once a conversation exists, so a blank Session (or a brand-new chat)
+     * gets a floating copy of the same dot in the same place.
+     * --------------------------------------------------------------------- */
+
+    /** How many Session headers are currently showing the dot. */
+    const headerSeat = (() => {
+      let holders = 0;
+      const listeners = new Set();
+      const publish = () => { for (const listener of listeners) listener(); };
+      return {
+        acquire() {
+          holders += 1;
+          publish();
+          return () => {
+            holders = Math.max(0, holders - 1);
+            publish();
+          };
+        },
+        subscribe(listener) {
+          listeners.add(listener);
+          return () => { listeners.delete(listener); };
+        },
+        getSnapshot() { return holders; },
+      };
+    })();
+
     /**
-     * The header entry: a pulsing status dot and its detail card.
-     * @param {{t: Function}} props - localized copy.
-     * @returns {React.ReactElement} the entry.
+     * Whether a Session header is already showing the dot.
+     * @returns {boolean} true while at least one header seat is occupied.
      */
-    function PeakDot(props) {
+    function useHeaderSeatOccupied() {
+      return React.useSyncExternalStore(headerSeat.subscribe, headerSeat.getSnapshot) > 0;
+    }
+
+    /** Claim the Session header seat for the life of the component. */
+    function useHeaderSeat() {
+      React.useEffect(() => headerSeat.acquire(), []);
+    }
+
+    /**
+     * Measure the resident conversation header and return the fixed position
+     * that matches the utilities row: the title row's vertical centre, the
+     * header's trailing padding.
+     * @param {boolean} enabled - whether to measure at all.
+     * @returns {{top: number, right: number} | null} the position, or null when the header is absent.
+     */
+    function useHeaderSeatPosition(enabled) {
+      const [position, setPosition] = React.useState(null);
+      React.useEffect(() => {
+        if (!enabled) {
+          setPosition(null);
+          return undefined;
+        }
+        const measure = () => {
+          let header = null;
+          for (const candidate of document.querySelectorAll('header[data-window-drag]')) {
+            if (candidate.querySelector('[data-conversation-header-leading]') !== null) {
+              header = candidate;
+              break;
+            }
+          }
+          if (header === null) {
+            setPosition(null);
+            return;
+          }
+          const rect = header.getBoundingClientRect();
+          if (rect.width <= 0 || rect.height <= 0) {
+            setPosition(null);
+            return;
+          }
+          const top = Math.round(rect.top + 11);
+          const right = Math.max(12, Math.round(window.innerWidth - rect.right) + FLOATING_SEAT_INSET);
+          setPosition(current => (current !== null && current.top === top && current.right === right
+            ? current
+            : { top, right }));
+        };
+        measure();
+        window.addEventListener('resize', measure);
+        return () => { window.removeEventListener('resize', measure); };
+      }, [enabled]);
+      return position;
+    }
+
+    /**
+     * The dot button and its card, shared by the header seat and the fallback.
+     * @param {{t: Function}} props - localized copy.
+     * @returns {React.ReactElement} the trigger and, while open, the card.
+     */
+    function PeakDotBody(props) {
       const { t } = props;
-      const now = useNow(STATUS_TICK_MS);
+      const now = useStatusNow();
       const state = readState(now);
       const status = t('status.' + state.mode);
       const summary = `${status} · ${t('caption.' + state.mode)} ${durationParts(state.remaining, t).join(' ')}`;
@@ -1234,12 +1785,12 @@ window.__ModuleLoader__.load({
         };
       }, [open, place]);
 
-      return h('div', { className: 'peakr-root' },
-        h(Style),
+      return h(React.Fragment, null,
         h('button', {
           ref: triggerRef,
           type: 'button',
           className: 'peakr-trigger',
+          'data-peakr-trigger': '',
           title: summary,
           'aria-label': summary,
           'aria-expanded': open,
@@ -1252,6 +1803,40 @@ window.__ModuleLoader__.load({
         open
           ? mountFloating(h(PeakCard, { t, cardRef, cardId, style: position }))
           : null,
+      );
+    }
+
+    /**
+     * The header entry: a pulsing status dot and its detail card.
+     * @param {{t: Function}} props - localized copy.
+     * @returns {React.ReactElement} the entry.
+     */
+    function PeakDot(props) {
+      useHeaderSeat();
+      return h('div', { className: 'peakr-root', 'data-peakr-seat': 'header' },
+        h(Style),
+        h(PeakDotBody, props),
+      );
+    }
+
+    /**
+     * The fallback entry for a chat with no conversation yet, where the Session
+     * header does not render its utilities. It occupies the same trailing seat.
+     * @param {{t: Function}} props - localized copy.
+     * @returns {React.ReactElement | null} the floating entry while the seat is free.
+     */
+    function PeakFloatingDot(props) {
+      const occupied = useHeaderSeatOccupied();
+      // One frame of grace keeps the very first paint from showing two dots
+      // before the header's mount effect has claimed the seat.
+      const [ready, setReady] = React.useState(false);
+      React.useEffect(() => { setReady(true); }, []);
+      const show = ready && !occupied;
+      const position = useHeaderSeatPosition(show);
+      if (!show || position === null) return null;
+      return h('div', { className: 'peakr-floating', style: position, 'data-peakr-seat': 'floating' },
+        h(Style),
+        h(PeakDotBody, props),
       );
     }
 
@@ -1532,27 +2117,40 @@ window.__ModuleLoader__.load({
 .peakr-knob[data-on='true'] { background: var(--dsw-alias-state-business-primary); }
 .peakr-knob[data-on='true']::after { transform: translateX(8px); }
 
-.peakr-usage-root { display: inline-flex; min-width: 0; }
+/* The footer seat is a full-width row that matches the account launcher
+   directly below it: same height, padding, radius, and label size, so the
+   number has room and never widens the control. */
+.peakr-usage-root { display: flex; flex: 1; min-width: 0; }
 .peakr-usage {
-  display: inline-flex; align-items: center; gap: 6px; height: 28px;
-  padding: 0 9px; border: 0; border-radius: 8px; background: transparent;
-  color: var(--dsw-alias-label-secondary); font: inherit; font-size: 11px;
-  line-height: 16px; cursor: pointer; min-width: 0;
-}
-.peakr-usage:hover {
-  background: var(--dsw-alias-interactive-bg-hover);
+  display: flex; align-items: center; gap: var(--dsh-sidebar-label-gap, 6px);
+  width: 100%; height: 42px; min-width: 0; margin: 0;
+  padding: 0 calc(var(--dsh-sidebar-row-padding, 12px) - var(--dsh-sidebar-paint-inset, 3px));
+  box-sizing: border-box; border: 0;
+  border-inline: var(--dsh-sidebar-paint-inset, 3px) solid transparent;
+  border-radius: var(--dsw-radius-md); background: transparent; background-clip: padding-box;
   color: var(--dsw-alias-label-primary);
+  font: inherit; font-size: 14px; line-height: 22px;
+  cursor: pointer; overflow: hidden;
+}
+@media (hover: hover) {
+  .peakr-usage:hover { background-color: var(--dsw-alias-interactive-bg-hover); }
 }
 .peakr-usage:focus-visible {
-  outline: 2px solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));
-  outline-offset: 1px;
+  outline: var(--dsw-focus-ring-width, 2px) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));
+  outline-offset: -2px;
 }
-.peakr-usage-icon { flex: none; }
-.peakr-usage-name { white-space: nowrap; }
+.peakr-usage[aria-expanded='true'] { background-color: var(--dsw-alias-interactive-bg-hover); }
+.peakr-usage-ring { flex: none; color: var(--dsw-alias-label-secondary); }
+.peakr-usage-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .peakr-usage-value {
-  color: var(--dsw-alias-label-tertiary);
-  font-variant-numeric: tabular-nums; white-space: nowrap;
+  flex: none; margin-left: auto;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12.5px; font-variant-numeric: tabular-nums; white-space: nowrap;
 }
+.peakr-usage[data-wide='false'] {
+  width: 36px; height: 36px; justify-content: center; padding: 0; border-inline: 0;
+}
+.peakr-usage[data-wide='false'] .peakr-usage-name,
 .peakr-usage[data-wide='false'] .peakr-usage-value { display: none; }
 
 .peakr-usage-card { width: 252px; }
@@ -1590,6 +2188,48 @@ window.__ModuleLoader__.load({
 .peakr-balance-value.is-muted {
   font-size: 11px; font-weight: 400; color: var(--dsw-alias-label-tertiary);
 }
+/* A credit read is an account round-trip, so the band says so: a spinner by
+   the label and a breathing placeholder where the figure will land. */
+.peakr-balance-value.is-loading {
+  color: var(--dsw-alias-label-tertiary);
+  animation: peakr-breathe 1.15s ease-in-out infinite;
+}
+.peakr-balance-spinner {
+  flex: none; width: 9px; height: 9px; border-radius: 50%; box-sizing: border-box;
+  border: 1.5px solid color-mix(in srgb, currentColor 28%, transparent);
+  border-top-color: currentColor;
+  animation: peakr-spin .7s linear infinite;
+}
+@keyframes peakr-spin { to { transform: rotate(360deg); } }
+@keyframes peakr-breathe {
+  0%, 100% { opacity: .4; }
+  50% { opacity: .95; }
+}
+/* The lifetime figure is only drawn where credit cannot be read; it is a
+   measured spend, not a balance, so it never shares the headline's weight. */
+.peakr-spent-key { margin-top: 2px; }
+.peakr-spent-value {
+  display: inline-flex; align-items: center; justify-content: flex-end; gap: 3px;
+  margin-top: 2px; color: var(--dsw-alias-label-primary);
+  font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums;
+}
+.peakr-spent-reset {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 18px; height: 18px; padding: 0; border: 0; border-radius: 6px;
+  background: transparent; color: var(--dsw-alias-label-tertiary); cursor: pointer;
+}
+.peakr-spent-reset:hover {
+  background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary);
+}
+.peakr-spent-reset:focus-visible {
+  outline: 2px solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));
+  outline-offset: 0;
+}
+
+/* The fallback dot in a chat with no conversation yet: pinned to the resident
+   header's trailing seat, under every menu and dialog so it never floats over
+   a panel that covers the header. */
+.peakr-floating { position: fixed; z-index: 30; direction: ltr; }
 
 .peakr-toast {
   position: fixed; z-index: 130; left: 50%; pointer-events: auto; cursor: pointer;
@@ -1614,6 +2254,8 @@ window.__ModuleLoader__.load({
 @media (prefers-reduced-motion: reduce) {
   .peakr-dot::after { animation: none; opacity: 0; }
   .peakr-toast { animation: none; transform: translate(-50%, 0); }
+  .peakr-balance-spinner,
+  .peakr-balance-value.is-loading { animation: none; }
 }
 `;
 
@@ -1667,6 +2309,15 @@ window.__ModuleLoader__.load({
           locale: NS,
           inject: () => ({ openSession }),
         }, PeakGlobal));
+
+        // A blank chat renders no Session header utilities, so the same dot
+        // falls back to a fixed seat at the header's trailing edge.
+        ctx.slots.inject('shell.overlay', () => ctx.slots.register({
+          name: 'shell.overlay',
+          id: 'peak-reminder.floating',
+          order: 38,
+          locale: NS,
+        }, PeakFloatingDot));
 
         // The usage cell sits in the sidebar foot, directly above the account row.
         const balanceStore = createStore(undefined);

@@ -14,10 +14,20 @@ const start = source.indexOf('const PRICE_TABLE = {');
 const end = source.indexOf('function UsageRow');
 assert.ok(start > 0 && end > start, 'could not slice the usage helpers out of client.js');
 
+// A storage stand-in seeded with the 1.9.0 credit shape, which must migrate to
+// the base/last pair the ring now compares against.
+const stored = new Map([['dsh.peak-reminder.credit', JSON.stringify({ USD: 20 })]]);
+global.localStorage = {
+  getItem: key => (stored.has(key) ? stored.get(key) : null),
+  setItem: (key, value) => { stored.set(key, String(value)); },
+};
+
 const api = new Function(`${source.slice(start, end)}
 return {
   priceFamily, estimateCost, formatTokens, formatCost, formatDuration,
   currentSessionId, formatMoney, balanceText, sumWallets, createStore, PRICE_TABLE,
+  readSpendBook, spendTotal, mergeSpend, resetSpend, sessionSpendCosts, creditShare,
+  readCreditMarks,
 };`)();
 
 // Model → price family.
@@ -95,6 +105,81 @@ assert.deepStrictEqual(
 assert.strictEqual(api.balanceText(api.sumWallets([{ balance: '10', currency: 'USD' }], [{ balance: '2.34', currency: 'USD' }])),
   '$12.34');
 assert.strictEqual(api.balanceText(api.sumWallets([], [])), null, 'no wallets means no headline');
+
+// The lifetime spend book: every Session's highest observed cost, minus the
+// baseline in force when the reader last reset the counter.
+const empty = { sessions: {} };
+assert.strictEqual(api.spendTotal(empty), 0);
+const first = api.mergeSpend(empty, { a: 0.5, b: 0.25 });
+assert.strictEqual(first.changed, true);
+assert.strictEqual(api.spendTotal(first.book), 0.75);
+assert.deepStrictEqual(first.book.sessions.a, { base: 0, seen: 0.5 });
+const same = api.mergeSpend(first.book, { a: 0.5 });
+assert.strictEqual(same.changed, false, 'an unchanged cost must not write');
+assert.strictEqual(api.spendTotal(first.book), 0.75);
+const lower = api.mergeSpend(first.book, { a: 0.4 });
+assert.strictEqual(lower.changed, false, 'a re-read that comes back lower must not shrink the total');
+const zero = api.mergeSpend(first.book, { c: 0 });
+assert.strictEqual(zero.changed, false, 'a Session with no usage is not bookkeeping');
+
+const reset = api.resetSpend(first.book, { a: 0.5, b: 0.25 });
+assert.strictEqual(api.spendTotal(reset), 0, 'a reset starts the counter again at zero');
+const afterReset = api.mergeSpend(reset, { a: 0.6 });
+assert.strictEqual(api.spendTotal(afterReset.book), 0.1, 'only spend after the reset counts');
+const unseen = api.resetSpend(empty, { d: 2 });
+assert.strictEqual(api.spendTotal(unseen), 0);
+assert.strictEqual(api.spendTotal(api.mergeSpend(unseen, { d: 3.5 }).book), 1.5,
+  'a Session first met at reset time keeps its baseline');
+
+// One cost per Session, charged from its own projection at the rate in force.
+const spendState = {
+  byId: { s1: { model: 'deepseek-flash' }, s2: { model: 'deepseek-v4-pro' } },
+  projectionsBySession: {
+    s1: { values: { tokenUsage: { uncachedInputTokens: 1e6 } } },
+    s2: { values: { tokenUsage: { outputTokens: 1e6 } } },
+    s3: { values: {} },
+  },
+};
+assert.deepStrictEqual(api.sessionSpendCosts(spendState, false), { s1: 0.15, s2: 1.98 });
+assert.deepStrictEqual(api.sessionSpendCosts(undefined, false), {});
+
+// The ring compares the current credit with the amount in force after the most
+// recent top-up. A rise re-baselines even below an older peak; a fall is spend.
+// The 1.9.0 high-water number had different semantics and is deliberately
+// dropped, so the next read starts a clean baseline.
+assert.deepStrictEqual(api.readCreditMarks(), {}, 'the old high-water shape is not reused');
+stored.set('dsh.peak-reminder.credit', JSON.stringify({ USD: { base: 12, last: 9 }, CNY: 'nope', EUR: { base: 1, last: 1 } }));
+assert.deepStrictEqual(api.readCreditMarks(), {
+  USD: { base: 12, last: 9 },
+  EUR: { base: 1, last: 1 },
+}, 'only well-formed base/last pairs load');
+const mark0 = api.creditShare([{ currency: 'USD', balance: '20' }], {});
+assert.strictEqual(mark0.share, 0, 'the first read is the baseline');
+assert.deepStrictEqual(mark0.marks, { USD: { base: 20, last: 20 } });
+assert.strictEqual(mark0.changed, true);
+const mark1 = api.creditShare([{ currency: 'USD', balance: '18' }], mark0.marks);
+assert.strictEqual(mark1.share, 0.1);
+assert.deepStrictEqual(mark1.marks, { USD: { base: 20, last: 18 } });
+const mark2 = api.creditShare([{ currency: 'USD', balance: '5' }], mark1.marks);
+assert.strictEqual(mark2.share, 0.75);
+assert.strictEqual(mark2.changed, true, 'a new balance is worth storing');
+const unchanged = api.creditShare([{ currency: 'USD', balance: '5' }], mark2.marks);
+assert.strictEqual(unchanged.changed, false, 'an identical read writes nothing');
+const toppedUp = api.creditShare([{ currency: 'USD', balance: '30' }], mark2.marks);
+assert.strictEqual(toppedUp.share, 0);
+assert.deepStrictEqual(toppedUp.marks, { USD: { base: 30, last: 30 } });
+// The case the high-water version got wrong: top up to an amount still below
+// the old peak. $5 -> $8 after a $20 peak must read as a fresh baseline, not
+// as the 60% the old ceiling would have shown.
+const belowPeak = api.creditShare([{ currency: 'USD', balance: '8' }], mark2.marks);
+assert.strictEqual(belowPeak.share, 0, 'any top-up re-baselines, even below the old peak');
+assert.deepStrictEqual(belowPeak.marks, { USD: { base: 8, last: 8 } });
+const mixed = api.creditShare([
+  { currency: 'USD', balance: '5' },
+  { currency: 'CNY', balance: '50' },
+], { USD: { base: 10, last: 10 }, CNY: { base: 50, last: 50 } });
+assert.strictEqual(mixed.share, 5 / 60);
+assert.strictEqual(api.creditShare([], {}).share, 0, 'no credit means no ratio');
 
 // The store publishes only real changes.
 const store = api.createStore(1);

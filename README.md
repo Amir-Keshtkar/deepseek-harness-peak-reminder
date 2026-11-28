@@ -18,11 +18,11 @@ Works with the DSH plugin system: install it once, and the peak schedule keeps i
 | Soon | amber, ringed | less than 30 minutes until a peak starts |
 | Off-peak | green, steady | everything else, including weekends and Chinese public holidays |
 
-Click it for a card with the countdown to the next change, a 24-hour ribbon of the current local day, and the peak windows in your own time zone. The four points where peak flips are hoverable — and focusable by keyboard — to name the exact time of each change. A one-shot toast announces the moment a peak begins.
+Click it for a card with the countdown to the next change, a 24-hour ribbon of the current local day, and the peak windows in your own time zone. The four points where peak flips are hoverable — and focusable by keyboard — to name the exact time of each change. A one-shot toast announces the moment a peak begins. The dot changes colour exactly at the boundary rather than on a poll, and it is also present in a brand-new chat, before the first message, where the Session header has no utilities row of its own.
 
 **Notifications.** A desktop notification arrives when a reply finishes or when the agent asks a question, so you can work elsewhere while DeepSeek runs. The window is left alone while it has focus, where the conversation already shows the result.
 
-**Usage.** A compact cell sits in the sidebar foot, directly above the account row, showing this session's token total and estimated cost. Click it for the input, cached, and output buckets, decode speed, turn count with total model time, the model when the session reports one, and the basis of the estimate. Below them, in its own tinted band so it never reads as a session metric, is the account balance: one figure, the credit left. It is read from the account service once the account is ready and again each time the panel opens. Cost comes from DeepSeek's published per-million rates, doubled inside a peak window; it is an estimate, not a bill.
+**Usage.** A full-width row sits in the sidebar foot, directly above the account row, at the same height and with the same label size. It carries a ring that fills with the share of the current charge already spent — the denominator is the credit present after your most recent top-up, and any rise re-baselines it — beside the estimated cost of this session. Click it for the input, cached, and output buckets, decode speed, turn count with total model time, the model when the session reports one, and the basis of the estimate. Below them is the account balance: one figure, the credit left, with a spinner while the account read is in flight. When the credit cannot be read at all — an API-key reader, a signed-out page, a refused account call — that band instead shows the lifetime figure spent across every Session in this browser, with a reset button for after a top-up. Cost comes from DeepSeek's published per-million rates, doubled inside a peak window; it is an estimate, not a bill.
 
 **Right-to-left text.** Answers, the questions you write, the session-list titles, the agent's multi-choice questions with their options, the approval prompt it raises before a guarded call, and Markdown files opened from the files panel all read right to left. Code blocks, YAML frontmatter, and formulas stay left to right — including the command detail under an approval. All three switches live in the card and are remembered per browser.
 
@@ -94,10 +94,11 @@ node --check client.js
 node --check index.js
 node --check scripts/sync-schedule.mjs
 
-TZ=Asia/Tehran node tests/time-model.test.cjs   # 16 boundary cases, ribbon, hover points
+TZ=Asia/Tehran node tests/time-model.test.cjs   # 16 boundary cases, wake instants, ribbon, hover points
 TZ=Asia/Tehran node tests/locales.test.cjs      # dictionary parity, manifest, input validation
 node tests/rtl.test.cjs                         # which surfaces mirror, which stay left to right
-node tests/usage.test.cjs                       # price table, cost estimate, formatters
+node tests/usage.test.cjs                       # price table, cost estimate, formatters, spend book, credit ratio
+node tests/panel.test.cjs                       # balance band states and the usage ring
 node scripts/sync-schedule.mjs --check          # the repo matches the official page
 ```
 
@@ -123,6 +124,12 @@ Yes. One switch in the card turns answers, your own messages, session titles, th
 **Why is the cost an estimate?**
 DSH reports tokens, not money. The plugin multiplies the tokens of the current session by DeepSeek's published per-million rates, doubling them inside a peak window. A session that spans a peak boundary is priced at the rate in force when the panel is opened, so treat the figure as a size, not a bill — the account's real remaining balance is shown below it.
 
+**What does the ring on the usage button show?**
+The share of your current charge already spent. The denominator is the credit present after your most recent top-up: when your credit goes up — for any reason, including a top-up that still leaves you below an older peak — the ring re-baselines to the new amount, and ordinary spending fills it from there. Without a readable balance — an API-key reader — the ring keeps its empty track, and the panel's band shows what has been spent instead. While the account read is running, the band shows a spinner rather than the previous figure.
+
+**I use an API key, so there is no balance. What can I see?**
+The panel's band shows a lifetime "Spent" figure: every Session this browser has seen, charged at DeepSeek's rates and accumulated with a high-water mark, so deleting a chat never lowers it. After a top-up, press the reset button beside the figure and the counter starts again from that moment. The number is an estimate of token cost, not the provider's bill.
+
 **Does it read my conversations?**
 No. It reads token counters the app already publishes and renders text it was given. The only outbound requests are the official pricing page, from the Host half, and `schedule.json`, from the browser.
 
@@ -136,7 +143,9 @@ No. It reads token counters the app already publishes and renders text it was gi
 - The RTL selectors match attribute hooks and CSS-module local names; a rename upstream would narrow them, not break rendering.
 - The usage cost is an estimate at the rate in force when the panel is read: a session that spans a peak boundary is not split between the two rates. The price table is shipped with the plugin.
 - The usage cell is hidden while the sidebar is collapsed, because the whole sidebar foot is hidden on this desktop build.
-- The balance band needs a signed-in account and a permitted account read; otherwise it says so instead of guessing. It shows the credit left — the topped-up and granted wallets added together — not a lifetime sum of top-ups.
+- The lifetime "Spent" figure adds every Session whose projection this browser has loaded; a Session it has never listed is not counted until it appears. Deleted Sessions keep what they spent, so the total is monotone until the reset button is pressed.
+- The ring's denominator is the credit present after the last top-up this browser observed, not a statement of the platform's top-up history. A rise re-baselines it at the next successful read; before the first read after install there is no ratio to draw.
+- The balance band needs a signed-in account and a permitted account read; otherwise it shows the lifetime spend instead of a made-up balance.
 - Chinese holiday dates are a maintained list, as noted above.
 
 ## Layout

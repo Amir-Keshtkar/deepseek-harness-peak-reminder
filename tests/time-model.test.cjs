@@ -20,7 +20,7 @@ const end = source.indexOf('let createPortal');
 assert.ok(start > 0 && end > start, 'could not slice the time block out of client.js');
 
 const api = new Function(`${source.slice(start, end)}
-return { isPeakAt, isHoliday, isRestDay, readState, nextTransition, dayBoundaries, durationParts, peakRange, clockTime, ribbonRuns, dayProgress };`)();
+return { isPeakAt, isHoliday, isRestDay, readState, nextTransition, nextStatusWake, dayBoundaries, durationParts, peakRange, clockTime, ribbonRuns, dayProgress };`)();
 
 const t = key => ({ 'unit.d': 'd', 'unit.h': 'h', 'unit.m': 'm', 'unit.s': 's' }[key]);
 const at = iso => Date.parse(iso);
@@ -71,6 +71,32 @@ assert.strictEqual(api.isRestDay(at('2026-11-14T02:00:00Z')), true, 'Saturday is
 assert.strictEqual(api.isRestDay(at('2026-10-01T02:00:00Z')), true, 'National Day is a rest day');
 assert.strictEqual(api.isRestDay(at('2026-11-17T02:00:00Z')), false, 'a normal Tuesday is not');
 assert.strictEqual(api.isHoliday(at('2026-10-08T02:00:00Z')), false, 'the day after National Day is not');
+
+// The status clock wakes exactly when the displayed state can change, so a
+// peak boundary is never shown with the old colour until the next poll.
+assert.strictEqual(
+  api.nextStatusWake(at('2026-11-17T03:59:00Z')) - at('2026-11-17T04:00:00Z'),
+  250,
+  'inside a peak window the wake is the window close, not a poll period later',
+);
+assert.strictEqual(
+  api.nextStatusWake(at('2026-11-17T04:00:00Z')) - at('2026-11-17T05:30:00Z'),
+  250,
+  'off-peak wakes at the start of the amber lead-in',
+);
+assert.strictEqual(
+  api.nextStatusWake(at('2026-11-17T05:40:00Z')) - at('2026-11-17T06:00:00Z'),
+  250,
+  'during the lead-in the wake is the peak start itself',
+);
+assert.ok(
+  api.nextStatusWake(at('2026-11-14T02:00:00Z')) > at('2026-11-14T02:00:00Z'),
+  'a rest day still wakes in the future',
+);
+assert.ok(
+  api.nextStatusWake(at('2026-11-17T04:00:00Z')) - at('2026-11-17T04:00:00Z') <= 91 * 60000,
+  'the wake is never parked past the lead-in',
+);
 
 // The ribbon covers a whole local day: a weekday shows two peak blocks, a
 // weekend shows none.

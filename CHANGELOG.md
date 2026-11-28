@@ -3,6 +3,46 @@
 All notable changes to this DeepSeek Harness plugin. Versions are the
 `version` field in `package.json`.
 
+## 1.9.1 — 2026-11-28
+
+- The usage ring now compares the current credit with the amount in force after
+  the most recent top-up, not with the highest number ever seen. Any rise
+  re-baselines the ring — even a top-up that stays below an older peak — so the
+  ratio always answers "how much of my current charge is left". A 1.9.0
+  high-water value is discarded rather than reused, because its semantics were
+  different.
+- Reading credit is visible while it happens. A balance read in flight shows a
+  spinner beside the label and a breathing placeholder instead of the previous
+  figure or a premature "Unavailable"; the lifetime Spent row waits for the read
+  to settle, so opening the panel no longer flashes a number that is about to
+  change.
+- The fallback dot in a new chat sits at the same inset as the Session header's
+  dot instead of hugging the window edge, so it is comfortably clickable.
+
+## 1.9.0 — 2026-11-28
+
+- The header dot repaints exactly when peak starts or ends. The old twenty-second
+  poll could show the previous colour indefinitely on a window whose timers were
+  throttled; the status clock now wakes at the boundary (and at the start of the
+  amber lead-in), and repaints at once when the window regains focus or the page
+  becomes visible.
+- The dot is present in a brand-new chat. The Session header hides its utilities
+  while the conversation is blank, so a floating copy now sits in the same
+  trailing seat until a Session header claims it.
+- The sidebar usage control is a full-width row matching the account launcher
+  directly below it: same 42px height, padding, radius, and label size. The
+  number no longer widens the control, and the row shows the estimated cost
+  rather than the token total (the tokens remain in the tooltip and the panel).
+- Its bar-chart glyph is replaced by a ring that fills with the share of credit
+  spent. The denominator is the highest credit this browser has seen per
+  currency, so a top-up raises the ceiling instead of pinning the ring at 100%.
+- With no readable balance — the API-key reader, or a refused account call — the
+  panel's balance band gains a lifetime "Spent" figure computed from every
+  Session's tokens, and a reset button for the moment the account is topped up.
+  The book is monotone and persisted, so deleting a chat or collapsing the
+  sidebar never lowers it. `tests/panel.test.cjs` covers the band and the ring,
+  and `tests/usage.test.cjs` covers the book and the credit ratio.
+
 ## 1.8.0 — 2026-11-22
 
 - Fixed the usage panel's balance band, which never left its loading placeholder
